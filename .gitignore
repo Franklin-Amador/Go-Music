@@ -1,0 +1,4 @@
+*.exe
+*.log
+*.syso
+.claude/settings.local.json
