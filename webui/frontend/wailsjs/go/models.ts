@@ -1,5 +1,27 @@
 export namespace main {
 	
+	export class AlbumData {
+	    artist: string;
+	    title: string;
+	    year: number;
+	    artBase64: string;
+	    accentHex: string;
+	    trackCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new AlbumData(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.artist = source["artist"];
+	        this.title = source["title"];
+	        this.year = source["year"];
+	        this.artBase64 = source["artBase64"];
+	        this.accentHex = source["accentHex"];
+	        this.trackCount = source["trackCount"];
+	    }
+	}
 	export class PlaylistTrack {
 	    index: number;
 	    path: string;

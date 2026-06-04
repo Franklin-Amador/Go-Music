@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gomusic/audio"
+	"gomusic/library"
 	"gomusic/playlist"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -72,6 +73,10 @@ type App struct {
 	// mu serialises all calls to loadAndPlay so concurrent next/prev/playAt
 	// calls never race the engine's Load/Play sequence.
 	mu sync.Mutex
+
+	// library — guarded by libMu.
+	lib   *library.Library
+	libMu sync.Mutex
 }
 
 func NewApp() *App {
@@ -149,6 +154,9 @@ func (a *App) startup(ctx context.Context) {
 		runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
 		go a.fetchAndEmitLyrics(info)
 	}
+
+	// Try loading the library gob cache from the previous session.
+	go a.tryLoadLibraryCache()
 
 	// ── waveform ticker (30 fps push from Go → frontend) ─────────────────────
 	go func() {

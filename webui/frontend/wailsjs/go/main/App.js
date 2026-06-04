@@ -18,6 +18,14 @@ export function GetCrossfade() {
   return window['go']['main']['App']['GetCrossfade']();
 }
 
+export function GetLibraryAlbums() {
+  return window['go']['main']['App']['GetLibraryAlbums']();
+}
+
+export function GetLibraryArtists() {
+  return window['go']['main']['App']['GetLibraryArtists']();
+}
+
 export function GetOutputMode() {
   return window['go']['main']['App']['GetOutputMode']();
 }
@@ -40,6 +48,10 @@ export function IsRepeat() {
 
 export function IsShuffle() {
   return window['go']['main']['App']['IsShuffle']();
+}
+
+export function LoadAlbum(arg1, arg2) {
+  return window['go']['main']['App']['LoadAlbum'](arg1, arg2);
 }
 
 export function LoadFile(arg1) {
@@ -76,6 +88,10 @@ export function Prev() {
 
 export function Remove(arg1) {
   return window['go']['main']['App']['Remove'](arg1);
+}
+
+export function ScanLibrary(arg1) {
+  return window['go']['main']['App']['ScanLibrary'](arg1);
 }
 
 export function Seek(arg1) {

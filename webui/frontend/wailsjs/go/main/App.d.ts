@@ -10,6 +10,10 @@ export function ClearPlaylist():Promise<void>;
 
 export function GetCrossfade():Promise<number>;
 
+export function GetLibraryAlbums():Promise<Array<main.AlbumData>>;
+
+export function GetLibraryArtists():Promise<Array<string>>;
+
 export function GetOutputMode():Promise<string>;
 
 export function GetPlaylist():Promise<Array<main.PlaylistTrack>>;
@@ -21,6 +25,8 @@ export function IsExclusive():Promise<boolean>;
 export function IsRepeat():Promise<boolean>;
 
 export function IsShuffle():Promise<boolean>;
+
+export function LoadAlbum(arg1:string,arg2:string):Promise<main.TrackInfo>;
 
 export function LoadFile(arg1:string):Promise<main.TrackInfo>;
 
@@ -39,6 +45,8 @@ export function PlayAt(arg1:number):Promise<main.TrackInfo>;
 export function Prev():Promise<main.TrackInfo>;
 
 export function Remove(arg1:number):Promise<Array<main.PlaylistTrack>>;
+
+export function ScanLibrary(arg1:string):Promise<void>;
 
 export function Seek(arg1:number):Promise<void>;
 
