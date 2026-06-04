@@ -35,7 +35,11 @@ These are non-negotiable. Violating them will break audio quality, playback safe
 
 8. **`OnFinished` must fire exactly once per playback.** Tracks auto-advance, so a double-fire skips a track. The `finishedSignaled atomic.Bool` flag on the Engine guards this. It's reset in `Play()` and CompareAndSwap'd to true the first time the player drains. Don't add another OnFinished call site that bypasses the flag. **For crossfade transitions OnFinished does NOT fire** — `OnTrackTransition` does, in the audio thread, the moment the new track first becomes audible. OnFinished is only for the natural end of the last track (no preload available).
 
-9. **`fyne.Do(...)` for every UI mutation from a non-UI goroutine.** Engine callbacks, the waveform ticker, lyric animation callbacks, async lyrics fetches, **media-key callbacks**, **the malgo audio thread (which calls `OnTrackTransition` from inside `tryStartCrossfade`)**, and library-scan progress callbacks all run off the UI thread. Calling Fyne widget methods directly from those will corrupt the render tree (sometimes visibly, sometimes silently). Wrap every UI touch. (Fyne's own `Animation.Start` callbacks dispatch onto the UI thread automatically — those don't need an extra `fyne.Do`.)
+9. **All UI mutations from non-UI goroutines must go through the correct dispatcher for the active frontend.**
+
+   - **Fyne UI (`ui/`):** `fyne.Do(func() { ... })`. Engine callbacks, the waveform ticker, lyric animation callbacks, async lyrics fetches, media-key callbacks, and the malgo audio thread all run off the UI thread. Calling Fyne widget methods directly from those will corrupt the render tree. Fyne's `Animation.Start` callbacks dispatch onto the UI thread automatically — those don't need an extra `fyne.Do`.
+
+   - **Wails UI (`webui/`):** `runtime.EventsEmit(ctx, eventName, data)`. The Wails runtime posts the event into the WebView's JS message queue on the correct thread. Never call `runtime.EventsEmit` from within a goroutine that doesn't have `ctx` from `App.startup` — store it in `App.ctx` and always use that field. Never call Wails runtime functions from inside engine callback closures *synchronously*; always call through the stored ctx.
 
 10. **The visualizer's `Push` is the only piece of audio-thread code that's allowed to call into anything outside the producer.** It is pure memcpy into a lock-free ring (no allocation, no FFT, no peak detection). `Snapshot()` (FFT) and `Waveform()` (peak envelope) both run from the UI ticker — never from a Reader or a producer.
 
@@ -57,6 +61,8 @@ These are non-negotiable. Violating them will break audio quality, playback safe
 
 ## Build
 
+### Fyne UI (`gomusic.exe`)
+
 ```powershell
 go build -ldflags="-H windowsgui -s -w" -o gomusic.exe .
 ```
@@ -65,6 +71,31 @@ go build -ldflags="-H windowsgui -s -w" -o gomusic.exe .
 it does NOT spawn an attached console window. `log.Printf` output is silently
 discarded in this mode — if you need logs while debugging, build without
 `-H windowsgui` (or redirect log output to a file).
+
+### Wails UI (`gomusic-web.exe`) — branch `webui-migration`
+
+Requires Wails CLI v2 and WebView2 Runtime (ships with Windows 11; download the evergreen bootstrapper for Win10).
+
+```powershell
+# Install Wails CLI once
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+# Build from the webui/ subdirectory
+cd webui
+wails build
+# → build/bin/gomusic-web.exe (~12 MB debug, use -ldflags="-s -w" for production)
+```
+
+For dev mode with hot-reload frontend (Go recompiles on save):
+```powershell
+cd webui
+wails dev
+```
+
+The Wails build uses the same MinGW GCC that the Fyne build needs — no extra
+toolchain required. The WebView2 runtime must be installed on the target
+machine (it ships with Windows 11 automatically; on Windows 10 install the
+[WebView2 Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703)).
 
 Requires GCC for both the Fyne UI AND the miniaudio C source that `gen2brain/malgo` wraps. **GCC 16.x from w64devkit is incompatible with Go's cgo** — it produces COFF objects Go can't parse. Use MinGW from Chocolatey (GCC 14.x) instead:
 
@@ -198,6 +229,19 @@ When you change anything in `audio/`, listen for:
 - **`canvas.Image` with `FillMode = ImageFillContain` inside `container.NewCenter` is constrained to its `MinSize`, NOT to the available space.** That's why the album art uses a custom `squareCenterLayout` (in `ui/window.go`) instead of `NewCenter`: the custom layout sizes children to the largest square that fits (`min(width, height)` of the parent) and centers them, so the cover grows with the window while keeping its aspect ratio. `NewCenter` alone leaves the art frozen at the MinSize regardless of how big the window gets.
 - Fyne's `canvas.NewColorRGBAAnimation` / `fyne.NewAnimation` callbacks already run on the UI thread, so don't wrap them in `fyne.Do` — but DO stop any in-flight animation before starting a new one on the same object, otherwise rapid line changes pile up and flicker. See `mainUI.stopLyricAnims`. The lyric depth-of-field cycle animates a small *set* of lines per transition (active + ±1 + previous-active + previous-±1, deduped via a map); stopping in-flight anims and rebuilding the set keeps the transitions visually continuous even when the user seeks through several lines quickly.
 - **`widget.List.Refresh()` repaints rows via `UpdateItem` but does NOT update Fyne's row-hover/selection rectangle.** The selection (the gray highlighted-row visual that Fyne paints on top of UpdateItem's output) only moves when the user clicks OR when code calls `widget.List.Select(rowID)`. So after a programmatic `pl.SetCurrent(i)` — auto-advance, prev/next, crossfade — you have to call BOTH `Refresh()` (for the `▸` prefix + accent color) AND `Select(rowID)` (for the system hover). The helper `syncListSelection()` does both, with `realToRow()` translating the canonical playlist index through any active search filter and `UnselectAll()` when the current track is filtered out. **Watch out: `List.Select(id)` synchronously fires `OnSelected`**, which would re-enter `loadAndPlay` and loop forever. The `suppressSelect bool` flag on `mainUI` short-circuits OnSelected during programmatic selection.
+### Wails UI footguns (webui/)
+
+- **`EnableFileDrop` is NOT a field of `options.App`.** It lives inside a nested `options.DragAndDrop` struct: `DragAndDrop: &options.DragAndDrop{EnableFileDrop: true}`. Putting it at the top level produces a compile error that looks like a typo rather than a wrong nesting level.
+- **Svelte 5 has no event modifiers.** `onclick|stopPropagation` is a parse error. Use `onclick={(e) => { e.stopPropagation(); handler() }}` instead.
+- **Import paths from `frontend/src/` to `frontend/wailsjs/` are ONE `../` up, not two.** `frontend/src/App.svelte` → `../wailsjs/...`. Two levels (`../../wailsjs/`) escapes the `frontend/` directory entirely and Rollup silently fails to resolve the module.
+- **`wails build` regenerates `wailsjs/go/main/App.js` and `App.d.ts` every time.** Any hand-edits to those files will be overwritten. The models file (`wailsjs/go/models.ts`) is also auto-generated. Write the types you need inline in the `.svelte` file or in a local `types.ts` instead.
+- **Wails bound methods that return `error` are exposed as rejected Promises in JS.** Wrap calls in `try/catch` or `.catch()`. A method returning only `error` (no data) maps to `Promise<void>` on the JS side.
+- **`runtime.OpenDirectoryDialog` (not `OpenFolderDialog`) is the Wails runtime function name.** The Go side uses `runtime.OpenDirectoryDialog`; the bound App method can be named whatever you like.
+- **`wails dev` requires Node.js on PATH.** It starts a Vite dev server, proxies asset requests, and rebuilds Go on file changes. It does NOT embed the frontend — the WebView loads from localhost. Production `wails build` embeds everything.
+- **The `wailsjs/go/models.ts` file is generated for every exported struct used as a return type.** If a bound method returns `*TrackInfo`, Wails generates `models.ts` with a `main.TrackInfo` interface. Import it from `../wailsjs/go/models` if you want the generated type, or define it inline to avoid coupling to the generated file.
+
+### Fyne UI footguns (ui/) — pre-existing
+
 - **`canvas.LinearGradient` with `EndColor` alpha 0 inside `container.NewStack`** has been reported to cause subtle mouse-position drift on Windows in Fyne 2.7.x. The right-column ambient backdrop uses this pattern — if a user reports "the mouse desyncs from the UI by a few pixels", first verify by temporarily replacing `container.NewStack(ui.bgGradient, ...)` with just the inner border container; if the issue disappears, refactor the backdrop to a `canvas.Rectangle` with a solid `FillColor` tinted to the dominant hue (loses the gradient feel but is hit-test-stable). Also check Windows DPI scaling — Fyne 2.7.x has separate known issues with custom widgets at non-100 % DPI; `setx FYNE_SCALE 1.0` is the standard escape hatch.
 
 ## Files at a glance
@@ -300,6 +344,38 @@ ui/
 
 resource_windows_amd64.syso  Generated by `rsrc` — embeds the .ico into the .exe
 main.go                      Entry point — calls ui.Run()
+
+webui/                       Wails 2 + Svelte 5 UI (branch webui-migration).
+                             Separate Go module (go.mod: replace gomusic => ../).
+                             audio/, playlist/, library/ are imported read-only;
+                             NOT a single line in those packages is modified.
+  app.go                     App struct bound to JS. Methods: LoadFile, Play,
+                             Pause, Stop, Seek, SetVolume, GetVolume,
+                             AddFiles, AddFolder, GetPlaylist, PlayAt, Next,
+                             Prev, Remove, ClearPlaylist, SetShuffle, SetRepeat,
+                             SetExclusive, IsExclusive, SetCrossfade, GetCrossfade,
+                             GetOutputMode, OpenFileDialog, OpenFolderDialog.
+                             Engine callbacks wired to runtime.EventsEmit in
+                             startup(). Waveform 30fps ticker goroutine.
+  library.go                 ScanLibrary (background goroutine + scan-progress
+                             events), GetLibraryAlbums, GetLibraryArtists,
+                             LoadAlbum (replaces playlist + starts play).
+                             Reads/writes same library.gob cache as the Fyne UI.
+  dominant.go                Port of ui/dominant.go with no Fyne dependency —
+                             returns dominant color as CSS hex string "#rrggbb".
+  main.go                    Wails entry point: 1080×720, min 720×500,
+                             DragAndDrop{EnableFileDrop:true}.
+  wails.json                 name=Go Music, outputfilename=gomusic-web
+  frontend/
+    src/App.svelte           Svelte 5 (runes). Two-column layout: sidebar 270px
+                             LEFT (Playlist|Albums|Artists tabs), player RIGHT.
+                             Canvas2D waveform, dynamic CSS accent from album art,
+                             depth-of-field lyrics, clickable progress bar,
+                             Shuffle/Repeat/Lyrics/Exclusive toggles.
+    wailsjs/go/main/         Auto-generated TS bindings — regenerated by wails
+                             build every time. Do NOT hand-edit these.
+  go.mod                     module webui; go 1.25.2; replace gomusic => ../
+  build/bin/gomusic-web.exe  Built output (~12 MB).
 ```
 
 ## When in doubt
