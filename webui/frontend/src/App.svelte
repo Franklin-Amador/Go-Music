@@ -28,7 +28,7 @@
   let showLyrics  = $state(false)
   let isShuffle   = $state(false)
   let isRepeat    = $state(false)
-  let isExclPref  = $state(true)
+  let isExclPref  = $state(false)  // shared by default — user opts into exclusive
 
   // ── library state ────────────────────────────────────────────────────────────
   let albums       = $state<AlbumData[]>([])
@@ -281,7 +281,7 @@
 
 <!-- ═══════════════════════════════════════════════════════════════════════════ -->
 
-<div class="layout">
+<div class="layout" class:lyrics-open={showLyrics && lyrics.length > 0}>
 
   <!-- ════ LEFT SIDEBAR ════════════════════════════════════════════════════ -->
   <aside class="sidebar">
@@ -549,9 +549,20 @@
       <span class="vol-pct">{Math.round(volume*100)}%</span>
     </div>
 
-    <!-- lyrics panel -->
-    {#if showLyrics && lyrics.length}
-      <div class="lyrics-wrap">
+    {#if errorMsg}
+      <div class="error-bar">{errorMsg} <button onclick={() => errorMsg=''}>✕</button></div>
+    {/if}
+
+  </main>
+
+  <!-- ════ RIGHT LYRICS PANEL ══════════════════════════════════════════ -->
+  {#if showLyrics && lyrics.length > 0}
+    <aside class="lyrics-panel">
+      <div class="lyrics-header">
+        <span>Lyrics</span>
+        <button class="lyrics-close" onclick={() => showLyrics=false}>✕</button>
+      </div>
+      <div class="lyrics-list">
         {#each lyrics as line, i}
           <p class="lyric"
              class:lyric-active={i===activeLyricIdx}
@@ -560,13 +571,9 @@
           </p>
         {/each}
       </div>
-    {/if}
+    </aside>
+  {/if}
 
-    {#if errorMsg}
-      <div class="error-bar">{errorMsg} <button onclick={() => errorMsg=''}>✕</button></div>
-    {/if}
-
-  </main>
 </div>
 
 <style>
@@ -602,6 +609,10 @@
     font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
+    transition: grid-template-columns 0.25s ease;
+  }
+  .layout.lyrics-open {
+    grid-template-columns: 260px 1fr 300px;
   }
 
   /* ════════════════ SIDEBAR ═════════════════════════════════════════ */
@@ -922,18 +933,45 @@
   .vol-pct { font-size: 0.68rem; color: var(--muted); min-width: 2.5rem; text-align: right;
              font-variant-numeric: tabular-nums }
 
-  /* lyrics */
-  .lyrics-wrap {
-    width: 100%; max-width: 640px; max-height: 220px; overflow-y: auto;
-    padding: 0.5rem 0; mask-image: linear-gradient(transparent, black 15%, black 85%, transparent);
-    -webkit-mask-image: linear-gradient(transparent, black 15%, black 85%, transparent)
+  /* ════════════════ LYRICS PANEL (right column) ═════════════════════ */
+  .lyrics-panel {
+    background: var(--sf1);
+    border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    animation: slide-in .22s ease-out;
+  }
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateX(20px) }
+    to   { opacity: 1; transform: translateX(0) }
+  }
+  .lyrics-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.7rem 1rem; border-bottom: 1px solid var(--border); flex-shrink: 0;
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted)
+  }
+  .lyrics-close {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 0.75rem; padding: 2px 6px; border-radius: 4px;
+    transition: color .12s
+  }
+  .lyrics-close:hover { color: var(--text) }
+  .lyrics-list {
+    flex: 1; overflow-y: auto; padding: 1.5rem 0;
+    mask-image: linear-gradient(transparent, black 8%, black 92%, transparent);
+    -webkit-mask-image: linear-gradient(transparent, black 8%, black 92%, transparent)
   }
   .lyric {
-    font-size: 0.83rem; color: var(--muted2); text-align: center;
-    padding: 0.25rem 1.5rem; line-height: 1.8; transition: all .25s ease-out
+    font-size: 0.82rem; color: var(--muted2); text-align: center;
+    padding: 0.28rem 1.2rem; line-height: 1.8; transition: all .22s ease-out;
+    cursor: default
   }
-  .lyric-near   { color: var(--muted); font-size: 0.9rem }
-  .lyric-active { font-size: 1.05rem; font-weight: 700; color: var(--accent); padding: 0.35rem 1.5rem }
+  .lyric-near   { font-size: 0.9rem; color: var(--muted) }
+  .lyric-active {
+    font-size: 1.02rem; font-weight: 700; color: var(--accent);
+    padding: 0.38rem 1.2rem
+  }
 
   /* error */
   .error-bar {

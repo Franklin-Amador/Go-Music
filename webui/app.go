@@ -89,6 +89,11 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
+	// Default to WASAPI shared mode — exclusive is an explicit user choice,
+	// not the default. The engine's zero value has exclusiveDisabled=false
+	// (meaning exclusive), so we flip it here before any Play() is called.
+	a.eng.SetExclusiveMode(false)
+
 	// ── engine callbacks → Wails events ──────────────────────────────────────
 
 	a.eng.OnStateChange = func(s audio.State) {
