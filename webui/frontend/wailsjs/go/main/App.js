@@ -38,6 +38,10 @@ export function GetPlaylist() {
   return window['go']['main']['App']['GetPlaylist']();
 }
 
+export function GetSpectrum() {
+  return window['go']['main']['App']['GetSpectrum']();
+}
+
 export function GetVolume() {
   return window['go']['main']['App']['GetVolume']();
 }

@@ -409,11 +409,16 @@ func (a *App) GetOutputMode() string { return a.eng.OutputMode() }
 func (a *App) SetCrossfade(sec float64) { a.eng.SetCrossfade(sec) }
 func (a *App) GetCrossfade() float64    { return a.eng.CrossfadeSeconds() }
 
-// GetWaveform returns the latest peak-envelope data for the frontend's
-// requestAnimationFrame loop. Called from a Wails goroutine (not the audio
-// thread), which is equivalent to the UI-ticker pattern in AGENTS.md §10.
+// GetWaveform returns the latest peak-envelope data (96 points, 38 ms window).
+// Called from a Wails goroutine — equivalent to the UI-ticker pattern in AGENTS.md §10.
 func (a *App) GetWaveform() []float32 {
 	return a.eng.Vis.Waveform(96, 38)
+}
+
+// GetSpectrum returns 32 log-spaced FFT band magnitudes in [0, 1].
+// Changes much faster than peak-envelope — ideal for bar visualizers.
+func (a *App) GetSpectrum() []float32 {
+	return a.eng.Vis.Snapshot()
 }
 
 // PlaySong loads path, adds it to the playlist if absent, and starts playing.

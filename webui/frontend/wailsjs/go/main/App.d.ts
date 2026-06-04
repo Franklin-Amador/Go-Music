@@ -20,6 +20,8 @@ export function GetOutputMode():Promise<string>;
 
 export function GetPlaylist():Promise<Array<main.PlaylistTrack>>;
 
+export function GetSpectrum():Promise<Array<number>>;
+
 export function GetVolume():Promise<number>;
 
 export function GetWaveform():Promise<Array<number>>;

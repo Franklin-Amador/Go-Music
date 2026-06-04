@@ -84,69 +84,142 @@
     s.setProperty('--accent-50',  `rgba(${r},${g},${b},0.50)`)
   })
 
-  // ── waveform: rAF loop polls GetWaveform() — display-sync'd, no IPC drift ───
+  // ── Visualizer: spring-physics spectrum bars + waveform overlay ─────────────
+  //
+  // Architecture:
+  //   rAF loop runs at display refresh rate (60 fps).
+  //   Every frame: step springs → draw. IPC poll for new data is non-blocking.
+  //   Springs decouple the draw rate from the IPC rate — smooth even if data
+  //   arrives at 30 fps. Spectrum (FFT) data reacts much faster than peak
+  //   envelope, making bars feel musically alive.
+
+  // Module-scope spring state (not $state — plain arrays, no Svelte tracking)
+  const N_BARS = 32
+  const N_WAVE = 48
+  const barPos  = new Float32Array(N_BARS).fill(0)
+  const barVel  = new Float32Array(N_BARS).fill(0)
+  const wavePos = new Float32Array(N_WAVE).fill(0)
+  const waveVel = new Float32Array(N_WAVE).fill(0)
+  let   latestSpectrum: number[] = []
+  let   latestWaveform: number[] = []
+  let   cachedRgb = '29,185,84'
+
+  // Keep cachedRgb in sync with accent (reactive → module-scope bridge)
+  $effect(() => {
+    const h = accentColor.replace('#','')
+    cachedRgb = `${parseInt(h.slice(0,2),16)},${parseInt(h.slice(2,4),16)},${parseInt(h.slice(4,6),16)}`
+  })
+
+  function stepSprings(pos: Float32Array, vel: Float32Array, src: number[], k: number, d: number) {
+    const n = pos.length
+    const sn = src.length
+    for (let i = 0; i < n; i++) {
+      const t = sn ? (src[Math.round(i * (sn-1) / (n-1))] ?? 0) : 0
+      vel[i] = vel[i] * d + (t - pos[i]) * k
+      pos[i] = Math.max(0, pos[i] + vel[i])
+    }
+  }
+
+  function drawFrame(ctx: CanvasRenderingContext2D, W: number, H: number) {
+    const cy = H / 2
+    const rgb = cachedRgb
+    ctx.clearRect(0, 0, W, H)
+
+    // ── Spectrum bars (symmetric up + down from center) ──────────────────────
+    const gap  = 1.5
+    const bW   = (W - gap * (N_BARS + 1)) / N_BARS
+
+    for (let i = 0; i < N_BARS; i++) {
+      const amp  = Math.min(1.15, barPos[i])
+      const edge = Math.min(1, Math.min(i, N_BARS-1-i) / (N_BARS * 0.1))
+      const h    = Math.max(1, amp * cy * 0.9 * edge)
+      const x    = gap + i * (bW + gap)
+      const r    = Math.min(bW / 2 - 0.5, 4)
+
+      const g = ctx.createLinearGradient(0, cy - h, 0, cy + h)
+      const a = (0.35 + amp * 0.65).toFixed(2)
+      const aD = (parseFloat(a) * 0.25).toFixed(2)
+      g.addColorStop(0,    `rgba(${rgb},${a})`)
+      g.addColorStop(0.35, `rgba(${rgb},${aD})`)
+      g.addColorStop(0.5,  `rgba(${rgb},0.02)`)
+      g.addColorStop(0.65, `rgba(${rgb},${aD})`)
+      g.addColorStop(1,    `rgba(${rgb},${a})`)
+
+      ctx.beginPath()
+      ctx.roundRect(x, cy - h, bW, h * 2, r)
+      ctx.fillStyle = g
+      ctx.fill()
+    }
+
+    // ── Waveform overlay (smooth Catmull-Rom through spring positions) ────────
+    if (latestWaveform.length) {
+      const step = W / (N_WAVE - 1)
+
+      const drawLine = (sign: number, alpha: string, width: number) => {
+        ctx.beginPath()
+        for (let i = 0; i < N_WAVE; i++) {
+          const edge = Math.min(1, Math.min(i, N_WAVE-1-i) / (N_WAVE * 0.07))
+          const y    = cy - wavePos[i] * cy * 0.72 * edge * sign
+          if (i === 0) {
+            ctx.moveTo(0, y)
+          } else {
+            // Midpoint quadratic — smooth B-spline through data points
+            const px = (i - 1) * step
+            const pe = Math.min(1, Math.min(i-1, N_WAVE-2-i) / (N_WAVE * 0.07))
+            const py = cy - wavePos[i-1] * cy * 0.72 * pe * sign
+            ctx.quadraticCurveTo(px, py, (px + i * step) / 2, (py + y) / 2)
+            ctx.lineTo(i * step, y)
+          }
+        }
+        ctx.strokeStyle = `rgba(${rgb},${alpha})`
+        ctx.lineWidth = width
+        ctx.lineJoin = 'round'
+        ctx.lineCap  = 'round'
+        ctx.stroke()
+      }
+
+      // Glow pass (both halves)
+      ctx.save(); ctx.filter = 'blur(3px)'
+      drawLine( 1, '0.35', 4)
+      drawLine(-1, '0.35', 4)
+      ctx.restore()
+
+      // Sharp pass
+      drawLine( 1, '0.85', 1.5)
+      drawLine(-1, '0.85', 1.5)
+    }
+  }
+
+  // Single rAF loop — steps springs every frame, polls IPC asynchronously
   $effect(() => {
     let rafId: number, running = true, pending = false
+
     function loop() {
       if (!running) return
       rafId = requestAnimationFrame(loop)
-      if (pending) return
-      pending = true
-      Backend.GetWaveform().then((data: number[]) => {
-        waveform = data ?? []
-        pending = false
-      }).catch(() => { pending = false })
+
+      stepSprings(barPos,  barVel,  latestSpectrum, 0.22, 0.60)
+      stepSprings(wavePos, waveVel, latestWaveform, 0.16, 0.68)
+
+      if (canvasEl) {
+        const ctx = canvasEl.getContext('2d')
+        if (ctx) drawFrame(ctx, canvasEl.width, canvasEl.height)
+      }
+
+      if (!pending) {
+        pending = true
+        Promise.all([Backend.GetSpectrum(), Backend.GetWaveform()])
+          .then(([spec, wave]) => {
+            latestSpectrum = spec  ?? []
+            latestWaveform = wave ?? []
+            pending = false
+          })
+          .catch(() => { pending = false })
+      }
     }
     rafId = requestAnimationFrame(loop)
     return () => { running = false; cancelAnimationFrame(rafId) }
   })
-
-  // ── canvas draw ──────────────────────────────────────────────────────────────
-  $effect(() => {
-    if (!canvasEl || !waveform.length) return
-    const ctx = canvasEl.getContext('2d')
-    if (!ctx) return
-    const W = canvasEl.width, H = canvasEl.height, cy = H / 2
-    ctx.clearRect(0, 0, W, H)
-    const pts = waveform.length, step = W / pts
-
-    ctx.beginPath()
-    for (let i = 0; i < pts; i++) {
-      const fade = Math.min(1, Math.min(i, pts-1-i) / (pts * 0.08))
-      const y = cy - waveform[i] * fade * cy * 0.88
-      i === 0 ? ctx.moveTo(0, y) : ctx.lineTo(i * step, y)
-    }
-    for (let i = pts-1; i >= 0; i--) {
-      const fade = Math.min(1, Math.min(i, pts-1-i) / (pts * 0.08))
-      ctx.lineTo(i * step, cy + waveform[i] * fade * cy * 0.88)
-    }
-    ctx.closePath()
-
-    // Gradient fill
-    const grad = ctx.createLinearGradient(0, 0, 0, H)
-    grad.addColorStop(0,   `rgba(var(--accent-rgb),0.25)`.replace('var(--accent-rgb)', getAccentRgb()))
-    grad.addColorStop(0.5, `rgba(var(--accent-rgb),0.08)`.replace('var(--accent-rgb)', getAccentRgb()))
-    grad.addColorStop(1,   `rgba(var(--accent-rgb),0.25)`.replace('var(--accent-rgb)', getAccentRgb()))
-    ctx.fillStyle = grad
-    ctx.fill()
-
-    // Glow stroke
-    ctx.save()
-    ctx.filter = 'blur(4px)'
-    ctx.strokeStyle = accentColor + '55'
-    ctx.lineWidth = 5
-    ctx.stroke()
-    ctx.restore()
-
-    // Sharp stroke
-    ctx.strokeStyle = accentColor + 'cc'
-    ctx.lineWidth = 1.5
-    ctx.stroke()
-  })
-
-  function getAccentRgb() {
-    return getComputedStyle(document.documentElement).getPropertyValue('--accent-rgb').trim() || '29,185,84'
-  }
 
   // ── lyric auto-scroll ────────────────────────────────────────────────────────
   $effect(() => {
@@ -474,7 +547,7 @@
     </div>
 
     <!-- waveform -->
-    <canvas bind:this={canvasEl} class="waveform" width="640" height="56"></canvas>
+    <canvas bind:this={canvasEl} class="waveform" width="640" height="72"></canvas>
 
     <!-- progress -->
     <div class="progress-section">
@@ -848,7 +921,7 @@
   @keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
 
   /* waveform */
-  .waveform { width: 100%; max-width: 640px; height: 56px; display: block; border-radius: 8px }
+  .waveform { width: 100%; max-width: 640px; height: 72px; display: block; border-radius: 8px }
 
   /* progress */
   .progress-section {
