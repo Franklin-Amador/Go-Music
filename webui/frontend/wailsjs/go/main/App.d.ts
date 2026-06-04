@@ -14,11 +14,15 @@ export function GetLibraryAlbums():Promise<Array<main.AlbumData>>;
 
 export function GetLibraryArtists():Promise<Array<string>>;
 
+export function GetLibrarySongs():Promise<Array<main.SongData>>;
+
 export function GetOutputMode():Promise<string>;
 
 export function GetPlaylist():Promise<Array<main.PlaylistTrack>>;
 
 export function GetVolume():Promise<number>;
+
+export function GetWaveform():Promise<Array<number>>;
 
 export function IsExclusive():Promise<boolean>;
 
@@ -41,6 +45,8 @@ export function Pause():Promise<void>;
 export function Play():Promise<void>;
 
 export function PlayAt(arg1:number):Promise<main.TrackInfo>;
+
+export function PlaySong(arg1:string):Promise<main.TrackInfo>;
 
 export function Prev():Promise<main.TrackInfo>;
 

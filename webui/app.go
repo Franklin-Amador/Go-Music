@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"gomusic/audio"
 	"gomusic/library"
@@ -157,23 +156,6 @@ func (a *App) startup(ctx context.Context) {
 
 	// Try loading the library gob cache from the previous session.
 	go a.tryLoadLibraryCache()
-
-	// ── waveform ticker (30 fps push from Go → frontend) ─────────────────────
-	go func() {
-		ticker := time.NewTicker(33 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				wf := a.eng.Vis.Waveform(96, 38)
-				if wf != nil {
-					runtime.EventsEmit(a.ctx, "waveform", wf)
-				}
-			case <-a.ctx.Done():
-				return
-			}
-		}
-	}()
 }
 
 func (a *App) shutdown(_ context.Context) {
@@ -421,6 +403,25 @@ func (a *App) GetOutputMode() string { return a.eng.OutputMode() }
 
 func (a *App) SetCrossfade(sec float64) { a.eng.SetCrossfade(sec) }
 func (a *App) GetCrossfade() float64    { return a.eng.CrossfadeSeconds() }
+
+// GetWaveform returns the latest peak-envelope data for the frontend's
+// requestAnimationFrame loop. Called from a Wails goroutine (not the audio
+// thread), which is equivalent to the UI-ticker pattern in AGENTS.md §10.
+func (a *App) GetWaveform() []float32 {
+	return a.eng.Vis.Waveform(96, 38)
+}
+
+// PlaySong loads path, adds it to the playlist if absent, and starts playing.
+func (a *App) PlaySong(path string) (*TrackInfo, error) {
+	a.pl.Add(path)
+	for i, t := range a.pl.Tracks {
+		if t.Path == path {
+			a.pl.SetCurrent(i)
+			return a.PlayAt(i)
+		}
+	}
+	return nil, nil
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

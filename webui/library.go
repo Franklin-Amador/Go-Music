@@ -4,12 +4,22 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gomusic/library"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// SongData is a flat track entry for the Songs tab.
+type SongData struct {
+	Path     string `json:"path"`
+	Title    string `json:"title"`
+	Artist   string `json:"artist"`
+	Album    string `json:"album"`
+	TrackNum int    `json:"trackNum"`
+}
 
 // AlbumData is the JSON view of a library.Album sent to the frontend.
 type AlbumData struct {
@@ -152,6 +162,43 @@ func toAlbumDataSlice(albums []*library.Album) []AlbumData {
 		}
 		out = append(out, d)
 	}
+	return out
+}
+
+// GetLibrarySongs returns all library tracks as a flat list sorted by
+// artist → album → track number. Used by the Songs tab.
+func (a *App) GetLibrarySongs() []SongData {
+	a.libMu.Lock()
+	lib := a.lib
+	a.libMu.Unlock()
+	if lib == nil {
+		return nil
+	}
+	var out []SongData
+	for _, al := range lib.Albums {
+		for _, t := range al.Tracks {
+			title := t.Title
+			if title == "" {
+				title = strings.TrimSuffix(filepath.Base(t.Path), filepath.Ext(t.Path))
+			}
+			out = append(out, SongData{
+				Path:     t.Path,
+				Title:    title,
+				Artist:   t.Artist,
+				Album:    al.Title,
+				TrackNum: t.TrackNum,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Artist != out[j].Artist {
+			return out[i].Artist < out[j].Artist
+		}
+		if out[i].Album != out[j].Album {
+			return out[i].Album < out[j].Album
+		}
+		return out[i].TrackNum < out[j].TrackNum
+	})
 	return out
 }
 

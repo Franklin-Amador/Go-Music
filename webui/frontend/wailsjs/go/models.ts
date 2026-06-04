@@ -40,6 +40,26 @@ export namespace main {
 	        this.current = source["current"];
 	    }
 	}
+	export class SongData {
+	    path: string;
+	    title: string;
+	    artist: string;
+	    album: string;
+	    trackNum: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SongData(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.title = source["title"];
+	        this.artist = source["artist"];
+	        this.album = source["album"];
+	        this.trackNum = source["trackNum"];
+	    }
+	}
 	export class TrackInfo {
 	    path: string;
 	    title: string;

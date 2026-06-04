@@ -26,6 +26,10 @@ export function GetLibraryArtists() {
   return window['go']['main']['App']['GetLibraryArtists']();
 }
 
+export function GetLibrarySongs() {
+  return window['go']['main']['App']['GetLibrarySongs']();
+}
+
 export function GetOutputMode() {
   return window['go']['main']['App']['GetOutputMode']();
 }
@@ -36,6 +40,10 @@ export function GetPlaylist() {
 
 export function GetVolume() {
   return window['go']['main']['App']['GetVolume']();
+}
+
+export function GetWaveform() {
+  return window['go']['main']['App']['GetWaveform']();
 }
 
 export function IsExclusive() {
@@ -80,6 +88,10 @@ export function Play() {
 
 export function PlayAt(arg1) {
   return window['go']['main']['App']['PlayAt'](arg1);
+}
+
+export function PlaySong(arg1) {
+  return window['go']['main']['App']['PlaySong'](arg1);
 }
 
 export function Prev() {
