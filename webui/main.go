@@ -29,7 +29,10 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 12, G: 12, B: 14, A: 255},
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,
-		Bind:             []interface{}{app},
+		Bind: []interface{}{app},
+		DragAndDrop: &options.DragAndDrop{
+			EnableFileDrop: true,
+		},
 		// Frameless + custom title bar will come in Fase 3.
 		// For now keep the native frame so the window is moveable.
 		Windows: &windows.Options{

@@ -1,5 +1,23 @@
 export namespace main {
 	
+	export class PlaylistTrack {
+	    index: number;
+	    path: string;
+	    title: string;
+	    current: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new PlaylistTrack(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.path = source["path"];
+	        this.title = source["title"];
+	        this.current = source["current"];
+	    }
+	}
 	export class TrackInfo {
 	    path: string;
 	    title: string;
@@ -11,7 +29,8 @@ export namespace main {
 	    duration: number;
 	    isDSD: boolean;
 	    hasArt: boolean;
-	    pictureMIME: string;
+	    artBase64: string;
+	    accentHex: string;
 	    outputMode: string;
 	
 	    static createFrom(source: any = {}) {
@@ -30,7 +49,8 @@ export namespace main {
 	        this.duration = source["duration"];
 	        this.isDSD = source["isDSD"];
 	        this.hasArt = source["hasArt"];
-	        this.pictureMIME = source["pictureMIME"];
+	        this.artBase64 = source["artBase64"];
+	        this.accentHex = source["accentHex"];
 	        this.outputMode = source["outputMode"];
 	    }
 	}
