@@ -10,6 +10,8 @@ export function ClearPlaylist():Promise<void>;
 
 export function GetCrossfade():Promise<number>;
 
+export function GetInitialState():Promise<main.webConfig>;
+
 export function GetLibraryAlbums():Promise<Array<main.AlbumData>>;
 
 export function GetLibraryArtists():Promise<Array<string>>;
@@ -53,6 +55,8 @@ export function PlaySong(arg1:string):Promise<main.TrackInfo>;
 export function Prev():Promise<main.TrackInfo>;
 
 export function Remove(arg1:number):Promise<Array<main.PlaylistTrack>>;
+
+export function SaveConfig():Promise<void>;
 
 export function ScanLibrary(arg1:string):Promise<void>;
 

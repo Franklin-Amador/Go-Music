@@ -18,6 +18,10 @@ export function GetCrossfade() {
   return window['go']['main']['App']['GetCrossfade']();
 }
 
+export function GetInitialState() {
+  return window['go']['main']['App']['GetInitialState']();
+}
+
 export function GetLibraryAlbums() {
   return window['go']['main']['App']['GetLibraryAlbums']();
 }
@@ -104,6 +108,10 @@ export function Prev() {
 
 export function Remove(arg1) {
   return window['go']['main']['App']['Remove'](arg1);
+}
+
+export function SaveConfig() {
+  return window['go']['main']['App']['SaveConfig']();
 }
 
 export function ScanLibrary(arg1) {

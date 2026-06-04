@@ -96,6 +96,32 @@ export namespace main {
 	        this.outputMode = source["outputMode"];
 	    }
 	}
+	export class webConfig {
+	    volume: number;
+	    playlist: string[];
+	    current: number;
+	    exclusive: boolean;
+	    crossfade: number;
+	    shuffle: boolean;
+	    repeat: boolean;
+	    musicRoot: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new webConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.volume = source["volume"];
+	        this.playlist = source["playlist"];
+	        this.current = source["current"];
+	        this.exclusive = source["exclusive"];
+	        this.crossfade = source["crossfade"];
+	        this.shuffle = source["shuffle"];
+	        this.repeat = source["repeat"];
+	        this.musicRoot = source["musicRoot"];
+	    }
+	}
 
 }
 

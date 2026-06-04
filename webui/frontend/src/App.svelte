@@ -235,6 +235,64 @@
     }
   })
 
+  // ── Restore persisted state on startup ───────────────────────────────────────
+  $effect(() => {
+    Backend.GetInitialState().then(cfg => {
+      if (!cfg) return
+      volume     = cfg.volume    ?? 1.0
+      isExclPref = cfg.exclusive ?? false
+      isShuffle  = cfg.shuffle   ?? false
+      isRepeat   = cfg.repeat    ?? false
+      // Engine already applied these in startup(); just sync the UI toggles.
+    })
+  })
+
+  // ── Save on window close (pagehide fires before WebView tears down) ──────────
+  $effect(() => {
+    const save = () => Backend.SaveConfig()
+    window.addEventListener('pagehide', save)
+    return () => window.removeEventListener('pagehide', save)
+  })
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────────
+  $effect(() => {
+    function onKey(e: KeyboardEvent) {
+      // Ignore when typing in an input
+      if ((e.target as HTMLElement).tagName === 'INPUT') return
+
+      switch (e.code) {
+        case 'Space':
+          e.preventDefault()
+          isPlaying ? pause() : play()
+          break
+        case 'ArrowRight':
+          if (e.ctrlKey) { e.preventDefault(); next() }
+          else           { e.preventDefault(); Backend.Seek(Math.min(pos + 5, dur)) }
+          break
+        case 'ArrowLeft':
+          if (e.ctrlKey) { e.preventDefault(); prev() }
+          else           { e.preventDefault(); Backend.Seek(Math.max(pos - 5, 0)) }
+          break
+        case 'ArrowUp':
+          e.preventDefault()
+          volume = Math.min(1, volume + 0.05)
+          Backend.SetVolume(volume)
+          break
+        case 'ArrowDown':
+          e.preventDefault()
+          volume = Math.max(0, volume - 0.05)
+          Backend.SetVolume(volume)
+          break
+        case 'KeyS': toggleShuffle(); break
+        case 'KeyR': toggleRepeat();  break
+        case 'KeyL': showLyrics = !showLyrics; break
+        case 'Escape': songSearch = ''; artistFilter = ''; break
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
   // ── Wails events ─────────────────────────────────────────────────────────────
   $effect(() => {
     const off = [
@@ -331,8 +389,30 @@
   function filterByArtist(artist:string) { artistFilter=artist; tab='albums' }
   function clearArtistFilter() { artistFilter='' }
 
-  function onProgressClick(e:MouseEvent) {
+  // Progress bar: click + drag to seek
+  let draggingProgress = false
+
+  function onProgressPointerDown(e: PointerEvent) {
     if (!dur) return
+    draggingProgress = true
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    seekFromPointer(e)
+  }
+  function onProgressPointerMove(e: PointerEvent) {
+    if (!draggingProgress || !dur) return
+    seekFromPointer(e)
+  }
+  function onProgressPointerUp(e: PointerEvent) {
+    draggingProgress = false
+  }
+  function seekFromPointer(e: PointerEvent) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
+    Backend.Seek(frac * dur)
+  }
+  // Keep click handler for non-pointer devices
+  function onProgressClick(e:MouseEvent) {
+    if (!dur || draggingProgress) return
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
     Backend.Seek(((e.clientX - r.left) / r.width) * dur)
   }
@@ -554,7 +634,12 @@
       <span class="time">{posStr}</span>
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="progress-track" onclick={onProgressClick}>
+      <div class="progress-track"
+           onclick={onProgressClick}
+           onpointerdown={onProgressPointerDown}
+           onpointermove={onProgressPointerMove}
+           onpointerup={onProgressPointerUp}
+           class:dragging={draggingProgress}>
         <div class="progress-fill" style="width:{progress}%">
           <div class="progress-thumb"></div>
         </div>
@@ -637,9 +722,20 @@
       </div>
       <div class="lyrics-list">
         {#each lyrics as line, i}
+          {@const dist = activeLyricIdx >= 0 ? Math.abs(i - activeLyricIdx) : 8}
+          {@const sizes   = ['1.10rem','0.90rem','0.78rem','0.70rem','0.65rem']}
+          {@const opas    = [1, 0.70, 0.42, 0.22, 0.12]}
+          {@const scales  = [1.04, 0.97, 0.93, 0.90, 0.87]}
+          {@const blurs   = [0, 0.6, 1.4, 2.4, 3.2]}
+          {@const d       = Math.min(dist, 4)}
           <p class="lyric"
-             class:lyric-active={i===activeLyricIdx}
-             class:lyric-near={Math.abs(i-activeLyricIdx)===1 && activeLyricIdx>=0}>
+             class:lyric-active={dist === 0}
+             style="
+               font-size:{sizes[d]};
+               opacity:{opas[d]};
+               transform:scale({scales[d]});
+               filter:blur({blurs[d]}px);
+             ">
             {line.text || '·'}
           </p>
         {/each}
@@ -672,28 +768,37 @@
   }
   * { box-sizing: border-box; margin: 0; padding: 0 }
 
-  /* ── root layout ────────────────────────────────────────────────────── */
+  /* ── root layout — proporciones fluidas ─────────────────────────────── */
   .layout {
     display: grid;
-    grid-template-columns: 260px 1fr;
+    grid-template-columns: clamp(200px, 23vw, 300px) 1fr;
     height: 100vh;
-    background: var(--bg);
     color: var(--text);
     font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
-    transition: grid-template-columns 0.25s ease;
+    transition: grid-template-columns 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    /* Subtle ambient tint across the whole window */
+    background:
+      radial-gradient(ellipse 120% 120% at 50% 50%,
+        rgba(var(--accent-rgb), 0.025) 0%, transparent 65%),
+      var(--bg);
   }
   .layout.lyrics-open {
-    grid-template-columns: 260px 1fr 300px;
+    grid-template-columns: clamp(200px, 23vw, 300px) 1fr clamp(200px, 22vw, 310px);
   }
 
   /* ════════════════ SIDEBAR ═════════════════════════════════════════ */
   .sidebar {
     display: flex; flex-direction: column;
-    background: var(--sf1);
+    background: linear-gradient(
+      175deg,
+      rgba(var(--accent-rgb), 0.05) 0%,
+      var(--sf1) 18%
+    );
     border-right: 1px solid var(--border);
     overflow: hidden;
+    transition: background 0.6s ease;
   }
 
   /* tabs */
@@ -844,43 +949,53 @@
     overflow-y: auto;
   }
 
-  /* ambient gradient behind player — reacts to accent */
+  /* ambient gradient — mucho más intenso, cubre más área */
   .player-bg {
     position: absolute; inset: 0; pointer-events: none; z-index: 0;
+    transition: opacity 0.8s ease;
     background:
-      radial-gradient(ellipse 80% 50% at 25% 0%, var(--accent-08) 0%, transparent 70%),
-      radial-gradient(ellipse 60% 40% at 75% 100%, var(--accent-08) 0%, transparent 60%),
+      radial-gradient(ellipse 110% 65% at 50% -8%,
+        rgba(var(--accent-rgb), 0.28) 0%, transparent 60%),
+      radial-gradient(ellipse 70% 50% at 10% 90%,
+        rgba(var(--accent-rgb), 0.15) 0%, transparent 55%),
+      radial-gradient(ellipse 60% 45% at 90% 85%,
+        rgba(var(--accent-rgb), 0.10) 0%, transparent 50%),
       var(--bg)
   }
 
   /* everything above the bg */
   .player > *:not(.player-bg) { position: relative; z-index: 1 }
 
-  /* album art */
+  /* album art — responsive al espacio disponible */
   .art-section { flex-shrink: 0 }
   .art-wrap {
     position: relative;
-    width: clamp(180px, 32vw, 300px);
-    aspect-ratio: 1; border-radius: 16px; overflow: hidden;
+    /* min(vw-based, vh-based, px cap) — se adapta al tamaño de ventana */
+    width: min(min(30vw, 38vh), 300px);
+    aspect-ratio: 1;
+    border-radius: clamp(12px, 2vw, 20px);
+    overflow: hidden;
     box-shadow:
-      0 30px 80px rgba(0,0,0,0.75),
-      0 0 0 1px var(--border),
-      0 0 50px var(--accent-15)
+      0 30px 90px rgba(0,0,0,0.8),
+      0 0 0 1px rgba(var(--accent-rgb), 0.15),
+      0 0 70px rgba(var(--accent-rgb), 0.25)
   }
   .art-wrap.art-empty {
     background: var(--sf1);
     display: flex; align-items: center; justify-content: center
   }
-  .art-glyph { font-size: 5rem; color: var(--muted2) }
+  .art-glyph { font-size: min(5rem, 8vw); color: var(--muted2) }
   .art-img {
     width: 100%; height: 100%; object-fit: cover;
-    position: relative; z-index: 1
+    position: relative; z-index: 1; transition: transform 0.4s ease
   }
+  .art-wrap:hover .art-img { transform: scale(1.02) }
   .art-glow {
-    position: absolute; inset: -25%; width: 150%; height: 150%;
+    position: absolute; inset: -30%; width: 160%; height: 160%;
     object-fit: cover;
-    filter: blur(40px) saturate(2.5) brightness(0.6);
-    opacity: 0.55; z-index: 0
+    filter: blur(50px) saturate(3.5) brightness(0.55);
+    opacity: 0.70; z-index: 0;
+    transition: opacity 0.8s ease
   }
 
   /* track info */
@@ -938,8 +1053,13 @@
   }
   .progress-track:hover { height: 6px }
   .progress-fill {
-    height: 100%; background: linear-gradient(90deg, var(--accent) 0%, var(--accent) 100%);
-    border-radius: 2px; position: relative; transition: width .25s linear
+    height: 100%;
+    background: linear-gradient(90deg,
+      rgba(var(--accent-rgb), 0.7) 0%,
+      var(--accent) 60%,
+      rgba(var(--accent-rgb), 0.9) 100%);
+    border-radius: 2px; position: relative; transition: width .25s linear;
+    box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.5)
   }
   .progress-thumb {
     position: absolute; right: -6px; top: 50%;
@@ -948,7 +1068,9 @@
     transform: translateY(-50%) scale(0);
     transition: transform .15s; pointer-events: none
   }
-  .progress-track:hover .progress-thumb { transform: translateY(-50%) scale(1) }
+  .progress-track:hover .progress-thumb,
+  .progress-track.dragging .progress-thumb { transform: translateY(-50%) scale(1) }
+  .progress-track.dragging { cursor: grabbing; height: 6px }
 
   /* transport */
   .transport { display: flex; align-items: center; gap: 0.6rem }
@@ -1008,11 +1130,16 @@
 
   /* ════════════════ LYRICS PANEL (right column) ═════════════════════ */
   .lyrics-panel {
-    background: var(--sf1);
-    border-left: 1px solid var(--border);
+    background: linear-gradient(
+      175deg,
+      rgba(var(--accent-rgb), 0.06) 0%,
+      var(--sf1) 20%
+    );
+    border-left: 1px solid rgba(var(--accent-rgb), 0.12);
     display: flex; flex-direction: column;
     overflow: hidden;
     animation: slide-in .22s ease-out;
+    transition: background 0.6s ease;
   }
   @keyframes slide-in {
     from { opacity: 0; transform: translateX(20px) }
@@ -1036,14 +1163,28 @@
     -webkit-mask-image: linear-gradient(transparent, black 8%, black 92%, transparent)
   }
   .lyric {
-    font-size: 0.82rem; color: var(--muted2); text-align: center;
-    padding: 0.28rem 1.2rem; line-height: 1.8; transition: all .22s ease-out;
-    cursor: default
+    /* font-size, opacity, transform, filter vienen del inline style  */
+    color: var(--text);
+    text-align: center;
+    padding: 0.26rem 1.4rem;
+    line-height: 1.85;
+    transform-origin: center center;
+    cursor: default;
+    transition:
+      font-size  0.38s cubic-bezier(0.4, 0, 0.2, 1),
+      opacity    0.38s cubic-bezier(0.4, 0, 0.2, 1),
+      transform  0.38s cubic-bezier(0.4, 0, 0.2, 1),
+      filter     0.38s cubic-bezier(0.4, 0, 0.2, 1),
+      color      0.30s ease,
+      text-shadow 0.30s ease;
   }
-  .lyric-near   { font-size: 0.9rem; color: var(--muted) }
   .lyric-active {
-    font-size: 1.02rem; font-weight: 700; color: var(--accent);
-    padding: 0.38rem 1.2rem
+    font-weight: 700;
+    color: var(--accent);
+    text-shadow:
+      0 0 30px rgba(var(--accent-rgb), 0.55),
+      0 0 60px rgba(var(--accent-rgb), 0.20);
+    padding: 0.38rem 1.4rem;
   }
 
   /* error */

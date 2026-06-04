@@ -89,10 +89,23 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
-	// Default to WASAPI shared mode — exclusive is an explicit user choice,
-	// not the default. The engine's zero value has exclusiveDisabled=false
-	// (meaning exclusive), so we flip it here before any Play() is called.
-	a.eng.SetExclusiveMode(false)
+	// Restore persisted settings before wiring callbacks.
+	cfg := loadConfig()
+	a.eng.Volume = cfg.Volume
+	a.eng.SetExclusiveMode(cfg.Exclusive)
+	a.eng.SetCrossfade(cfg.Crossfade)
+	if cfg.Shuffle {
+		a.pl.ToggleShuffle()
+	}
+	a.repeatOne.Store(cfg.Repeat)
+
+	// Restore playlist (paths only — no auto-play on startup).
+	for _, path := range cfg.Playlist {
+		a.pl.Add(path)
+	}
+	if cfg.Current >= 0 && cfg.Current < len(a.pl.Tracks) {
+		a.pl.SetCurrent(cfg.Current)
+	}
 
 	// ── engine callbacks → Wails events ──────────────────────────────────────
 
@@ -154,9 +167,15 @@ func (a *App) startup(ctx context.Context) {
 		a.preloadMu.Unlock()
 
 		ti := toTrackInfo(info, a.eng.OutputMode())
+		a.setWindowTitle(info)
 		runtime.EventsEmit(a.ctx, "track-change", ti)
 		runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
 		go a.fetchAndEmitLyrics(info)
+	}
+
+	// Emit restored playlist so the frontend tab populates immediately.
+	if len(a.pl.Tracks) > 0 {
+		runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
 	}
 
 	// Try loading the library gob cache from the previous session.
@@ -165,6 +184,7 @@ func (a *App) startup(ctx context.Context) {
 
 func (a *App) shutdown(_ context.Context) {
 	a.eng.Stop()
+	a.saveConfig()
 }
 
 // ── internal helpers ──────────────────────────────────────────────────────────
@@ -190,9 +210,26 @@ func (a *App) loadAndPlay(path string) {
 		return
 	}
 	ti := toTrackInfo(info, a.eng.OutputMode())
+	a.setWindowTitle(info)
 	runtime.EventsEmit(a.ctx, "track-change", ti)
 	runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
 	go a.fetchAndEmitLyrics(info)
+}
+
+func (a *App) setWindowTitle(info *audio.FileInfo) {
+	if info == nil {
+		runtime.WindowSetTitle(a.ctx, "Go Music")
+		return
+	}
+	title := info.Title
+	if title == "" {
+		title = filepath.Base(info.Path)
+	}
+	if info.Artist != "" {
+		runtime.WindowSetTitle(a.ctx, info.Artist+" — "+title+" · Go Music")
+	} else {
+		runtime.WindowSetTitle(a.ctx, title+" · Go Music")
+	}
 }
 
 func (a *App) fetchAndEmitLyrics(info *audio.FileInfo) {
