@@ -59,8 +59,13 @@ func Run() {
 
 	w := a.NewWindow("Go Music")
 	w.SetIcon(appIconResource)
-	// Open at a tall, comfortable size; user can maximize from there.
-	w.Resize(fyne.NewSize(1100, 980))
+	// Open at a comfortable size that fits a 1366×768 laptop with taskbar
+	// (working area ≈ 728 px tall). Going taller — even though it looks
+	// nice on a desktop — gets clamped by the OS on small screens and then
+	// the user can't shrink the window because the content's MinSize is
+	// already close to that clamped maximum. Users on big monitors can
+	// drag-resize or maximize from this baseline.
+	w.Resize(fyne.NewSize(1080, 720))
 	w.CenterOnScreen()
 
 	cfg := loadConfig()
@@ -132,16 +137,22 @@ type mainUI struct {
 	formatText *canvas.Text
 	posLabel   *canvas.Text
 	durLabel   *canvas.Text
+	modeLabel  *canvas.Text
 	progress   *widget.Slider
 	playBtn    *widget.Button
 	listWidget *widget.List
 	artBg       *canvas.Rectangle
 	artImage    *canvas.Image
 	artGlyph    *canvas.Text
+	bgGradient  *canvas.LinearGradient // album-derived ambient backdrop for the right column
+	currentAccent color.NRGBA          // dominant color of the current track (zero when not set)
 	eng         *audio.Engine
 	pl          *playlist.Playlist
 	seeking     bool
 	updatingUI  bool
+	// suppressSelect guards programmatic listWidget.Select() calls from
+	// triggering OnSelected — which would re-enter loadAndPlay and loop.
+	suppressSelect bool
 	shuffleBtn  *widget.Button
 	shuffleDot  *canvas.Circle
 	repeatTrack bool // when true, OnFinished restarts the same track instead of advancing
@@ -204,21 +215,22 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 	ui := &mainUI{eng: eng, pl: pl, win: w, cfg: cfg, showLyrics: cfg.ShowLyrics}
 
 	// ── Album art block ──────────────────────────────────────────────────
-	// Min sizes are modest so the art can both shrink for small windows and
-	// grow to fill a tall window. The Stack/Border layout below makes it
-	// expand to fill all available vertical space in the player column.
+	// Min sizes are modest so the art can shrink for small windows (the
+	// squareCenterLayout below grows it back up to fill the available
+	// space). Lower MinSize → smaller window MinSize → the user can drag
+	// the window down to laptop-screen sizes.
 	ui.artBg = canvas.NewRectangle(colorBgElevated)
-	ui.artBg.SetMinSize(fyne.NewSize(240, 240))
+	ui.artBg.SetMinSize(fyne.NewSize(180, 180))
 	ui.artBg.CornerRadius = 10
 
 	ui.artGlyph = canvas.NewText("♪", color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0x55})
-	ui.artGlyph.TextSize = 130
+	ui.artGlyph.TextSize = 110
 	ui.artGlyph.Alignment = fyne.TextAlignCenter
 	ui.artGlyph.TextStyle = fyne.TextStyle{Bold: true}
 
 	ui.artImage = &canvas.Image{}
 	ui.artImage.FillMode = canvas.ImageFillContain
-	ui.artImage.SetMinSize(fyne.NewSize(240, 240))
+	ui.artImage.SetMinSize(fyne.NewSize(180, 180))
 	ui.artImage.Hide()
 
 	artStack := container.NewStack(
@@ -229,12 +241,12 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 
 	// ── Track header text (title / artist / album) ───────────────────────
 	ui.titleText = canvas.NewText("No track loaded", colorText)
-	ui.titleText.TextSize = 24
+	ui.titleText.TextSize = 28
 	ui.titleText.TextStyle = fyne.TextStyle{Bold: true}
 	ui.titleText.Alignment = fyne.TextAlignCenter
 
 	ui.artistText = canvas.NewText("", colorText)
-	ui.artistText.TextSize = 15
+	ui.artistText.TextSize = 16
 	ui.artistText.Alignment = fyne.TextAlignCenter
 
 	ui.albumText = canvas.NewText("Open a file or folder to begin", colorTextDim)
@@ -268,6 +280,9 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 	ui.durLabel = canvas.NewText("0:00", colorTextDim)
 	ui.durLabel.TextSize = 11
 	ui.durLabel.Alignment = fyne.TextAlignTrailing
+	ui.modeLabel = canvas.NewText("", colorTextDim)
+	ui.modeLabel.TextSize = 10
+	ui.modeLabel.Alignment = fyne.TextAlignCenter
 
 	ui.progress = widget.NewSlider(0, 1)
 	ui.progress.Step = 0.0001
@@ -309,7 +324,7 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 
 	timeRow := container.New(layout.NewBorderLayout(nil, nil, ui.posLabel, ui.durLabel),
 		ui.posLabel, ui.durLabel,
-		layout.NewSpacer(),
+		container.NewCenter(ui.modeLabel),
 	)
 
 	progressBlock := container.NewVBox(
@@ -430,13 +445,27 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 		spacer(8),
 	)
 
-	artArea := container.NewPadded(container.NewCenter(artStack))
+	// Square-fit + center: the art grows to fill the available space while
+	// keeping its aspect ratio. NewCenter alone would freeze it at MinSize.
+	artArea := container.NewPadded(container.New(squareCenterLayout{}, artStack))
 
-	rightColumn := container.NewBorder(
-		spacer(12),  // top
-		bottomBlock, // bottom — fixed natural height
-		nil, nil,    // left, right
-		artArea, // center — expands
+	// Ambient backdrop: a vertical gradient under the player column whose
+	// top color is derived from the current track's album art. Starts fully
+	// transparent (no album loaded yet) so the base theme background shows
+	// through; applyMetadata fills it in once the cover is decoded.
+	ui.bgGradient = canvas.NewVerticalGradient(
+		color.NRGBA{},      // top — set per-track
+		color.NRGBA{},      // bottom — set per-track (transparent fades to base bg)
+	)
+
+	rightColumn := container.NewStack(
+		ui.bgGradient,
+		container.NewBorder(
+			spacer(12),  // top
+			bottomBlock, // bottom — fixed natural height
+			nil, nil,    // left, right
+			artArea, // center — expands
+		),
 	)
 
 	// ── Left column: playlist ────────────────────────────────────────────
@@ -523,6 +552,11 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 		},
 	)
 	ui.listWidget.OnSelected = func(id widget.ListItemID) {
+		// Ignore selections triggered programmatically by syncListSelection
+		// — they exist only to update the visual hover, NOT to re-load.
+		if ui.suppressSelect {
+			return
+		}
 		real := ui.rowToReal(id)
 		if real < 0 || real >= pl.Len() {
 			return
@@ -627,6 +661,7 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 				ui.updateLyricsPosition(pos)
 			}
 			ui.maybePreloadNext(pos, dur)
+			ui.refreshModeLabel(eng)
 		})
 	}
 
@@ -655,7 +690,7 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 			ui.durLabel.Text = fmtDuration(info.Duration)
 			ui.durLabel.Refresh()
 			ui.wave.SetPosition(0)
-			ui.listWidget.Refresh()
+			ui.syncListSelection()
 			ui.setEmptyLyrics("Searching for lyrics…")
 
 			// Fetch lyrics for the new track. Token bumped so any pending
@@ -689,7 +724,7 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 				return
 			}
 			if t := pl.Next(); t != nil {
-				ui.listWidget.Refresh()
+				ui.syncListSelection()
 				ui.loadAndPlay(t.Path)
 			}
 		})
@@ -702,7 +737,7 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 
 func (ui *mainUI) goNext() {
 	if t := ui.pl.Next(); t != nil {
-		ui.listWidget.Refresh()
+		ui.syncListSelection()
 		ui.loadAndPlay(t.Path)
 	}
 }
@@ -717,7 +752,7 @@ func (ui *mainUI) goPrev() {
 		return
 	}
 	if t := ui.pl.Prev(); t != nil {
-		ui.listWidget.Refresh()
+		ui.syncListSelection()
 		ui.loadAndPlay(t.Path)
 	}
 }
@@ -729,7 +764,10 @@ func (ui *mainUI) stopPlayback() {
 	ui.updatingUI = false
 	ui.posLabel.Text = "0:00"
 	ui.posLabel.Refresh()
-	ui.wave.SetPosition(-1) // hide cursor
+	ui.modeLabel.Text = ""
+	ui.modeLabel.Refresh()
+	ui.applyAccent(color.NRGBA{}) // restore default green / clear backdrop
+	ui.wave.SetPosition(-1)       // hide cursor
 }
 
 func (ui *mainUI) seekRelative(deltaSec float64) {
@@ -950,6 +988,46 @@ func (ui *mainUI) rowToReal(row int) int {
 	return row
 }
 
+// realToRow is the inverse of rowToReal: turns a canonical playlist index
+// into the corresponding visible-list row, or -1 if the track is currently
+// hidden by an active filter.
+func (ui *mainUI) realToRow(real int) int {
+	if real < 0 {
+		return -1
+	}
+	if ui.filtered == nil {
+		if real >= ui.pl.Len() {
+			return -1
+		}
+		return real
+	}
+	for row, r := range ui.filtered {
+		if r == real {
+			return row
+		}
+	}
+	return -1
+}
+
+// syncListSelection refreshes the visible playlist AND updates Fyne's row
+// hover/selection so it tracks the current playing song. Called from every
+// path that changes pl.Current programmatically — auto-advance, prev/next,
+// crossfade transition, album-from-library load. Without this the "▸"
+// prefix and accent color move (via UpdateItem) but the system hover stays
+// stuck on whatever row the user last clicked manually.
+func (ui *mainUI) syncListSelection() {
+	ui.listWidget.Refresh()
+	row := ui.realToRow(ui.pl.Current)
+	ui.suppressSelect = true
+	defer func() { ui.suppressSelect = false }()
+	if row < 0 {
+		ui.listWidget.UnselectAll()
+		return
+	}
+	ui.listWidget.Select(row)
+	ui.listWidget.ScrollTo(row)
+}
+
 // applyFilter rebuilds `filtered` from the current query string. An empty
 // query clears the filter (returns to showing every track).
 func (ui *mainUI) applyFilter(q string) {
@@ -1006,7 +1084,7 @@ func (ui *mainUI) removeCurrent() {
 	ui.eng.Stop()
 	ui.pl.Remove(idx)
 	ui.applyFilter(ui.searchEntry.Text) // rebuild filter against new tracks
-	ui.listWidget.Refresh()
+	ui.syncListSelection()
 	if ui.pl.Len() == 0 {
 		ui.stopPlayback()
 		return
@@ -1032,7 +1110,7 @@ func (ui *mainUI) moveCurrent(delta int) {
 	}
 	ui.pl.Move(ui.pl.Current, to)
 	ui.applyFilter(ui.searchEntry.Text) // filtered indices may have shifted
-	ui.listWidget.Refresh()
+	ui.syncListSelection()
 }
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -1061,7 +1139,7 @@ func (ui *mainUI) loadAndPlay(path string) {
 			ui.wave.SetPosition(0)
 			ui.durLabel.Text = fmtDuration(info.Duration)
 			ui.durLabel.Refresh()
-			ui.listWidget.Refresh()
+			ui.syncListSelection()
 			ui.setEmptyLyrics("Searching for lyrics…")
 		})
 		if err := ui.eng.Play(); err != nil {
@@ -1104,26 +1182,91 @@ func (ui *mainUI) applyMetadata(info *audio.FileInfo) {
 	ui.formatText.Refresh()
 
 	// Album art: real picture if available, otherwise a hash-tinted placeholder.
+	// Either way, derive an accent color so the rest of the UI (gradient,
+	// format label, waveform) can echo the current track's visual identity.
 	if len(info.PictureData) > 0 {
 		res := fyne.NewStaticResource("cover", info.PictureData)
 		ui.artImage.Resource = res
 		ui.artImage.Refresh()
 		ui.artImage.Show()
 		ui.artGlyph.Hide()
+		// Reset accent immediately so the previous track's hue doesn't linger
+		// for the ~30–50 ms the goroutine takes to decode and sample. The
+		// brief flash to default green is less jarring than the previous
+		// track's color still on screen with a new cover.
+		ui.applyAccent(color.NRGBA{})
+		// Decode + sample the cover off the UI goroutine: image.Decode of a
+		// 500 KB JPEG takes long enough to be visible at load time. Token
+		// guards against late results landing on a newer track.
+		picBytes := info.PictureData
+		tok := ui.lyricsToken // piggyback on the lyrics token — increments on every Load
+		go func() {
+			c, ok := dominantColor(picBytes)
+			fyne.Do(func() {
+				if tok != ui.lyricsToken {
+					return // user moved on
+				}
+				if ok {
+					ui.applyAccent(c)
+				}
+			})
+		}()
 	} else {
 		ui.artImage.Hide()
 		ui.artGlyph.Show()
 		// Tint the placeholder rectangle by file hash so each track has a
-		// distinct visual fingerprint.
+		// distinct visual fingerprint, and reuse that same hue for the
+		// ambient gradient so the player still feels track-aware even when
+		// the file has no embedded art.
 		sum := md5.Sum([]byte(info.Path))
-		ui.artBg.FillColor = color.NRGBA{
-			R: 0x28 + (sum[0] >> 1),
-			G: 0x28 + (sum[1] >> 1),
-			B: 0x28 + (sum[2] >> 1),
+		hashCol := color.NRGBA{
+			R: 0x40 + (sum[0] >> 1),
+			G: 0x40 + (sum[1] >> 1),
+			B: 0x40 + (sum[2] >> 1),
 			A: 0xff,
 		}
+		ui.artBg.FillColor = hashCol
 		ui.artBg.Refresh()
+		ui.applyAccent(hashCol)
 	}
+}
+
+// applyAccent retints every UI element that follows the current track's
+// dominant color: the ambient backdrop gradient, the quality / mode labels,
+// and the waveform. Pass a zero-alpha color to restore the theme defaults
+// (used during startup and after stop).
+func (ui *mainUI) applyAccent(c color.NRGBA) {
+	ui.currentAccent = c
+	if c.A == 0 {
+		// Reset to theme defaults.
+		ui.bgGradient.StartColor = color.NRGBA{}
+		ui.bgGradient.EndColor = color.NRGBA{}
+		ui.bgGradient.Refresh()
+		ui.formatText.Color = colorAccent
+		ui.formatText.Refresh()
+		ui.wave.SetAccent(color.NRGBA{})
+		ui.refreshModeLabel(ui.eng)
+		return
+	}
+
+	// Gradient: dominant color tinted way down at the top, fully transparent
+	// at the bottom so the base bg shows through and the controls stay
+	// readable. ~14% alpha is the sweet spot: visible hue without washing
+	// the album art's contrast.
+	ui.bgGradient.StartColor = tint(c, 0x24)
+	ui.bgGradient.EndColor = color.NRGBA{}
+	ui.bgGradient.Refresh()
+
+	// Brightened version of the dominant color for text overlays — extracted
+	// colors at native luminance often read as muddy on a near-black bg.
+	bright := brighten(c, 0.45)
+	ui.formatText.Color = bright
+	ui.formatText.Refresh()
+
+	ui.wave.SetAccent(c)
+
+	// Mode label also follows the accent when exclusive mode is active.
+	ui.refreshModeLabel(ui.eng)
 }
 
 func (ui *mainUI) togglePlay() {
@@ -1303,6 +1446,43 @@ func spacer(h float32) fyne.CanvasObject {
 	return r
 }
 
+// squareCenterLayout sizes every child to the largest square that fits within
+// the container's bounds (min of width/height) and centers it. Used for the
+// album-art stack so the cover grows with the window instead of staying
+// pinned at its MinSize — container.NewCenter would constrain to MinSize and
+// container.NewStack alone would stretch into a non-square rectangle.
+type squareCenterLayout struct{}
+
+func (squareCenterLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	side := size.Width
+	if size.Height < side {
+		side = size.Height
+	}
+	if side < 0 {
+		side = 0
+	}
+	pos := fyne.NewPos((size.Width-side)/2, (size.Height-side)/2)
+	sz := fyne.NewSize(side, side)
+	for _, o := range objs {
+		o.Resize(sz)
+		o.Move(pos)
+	}
+}
+
+func (squareCenterLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	var m fyne.Size
+	for _, o := range objs {
+		s := o.MinSize()
+		if s.Width > m.Width {
+			m.Width = s.Width
+		}
+		if s.Height > m.Height {
+			m.Height = s.Height
+		}
+	}
+	return m
+}
+
 // spacerH returns a fixed horizontal-only spacer of the given width.
 func spacerH(w float32) fyne.CanvasObject {
 	r := canvas.NewRectangle(color.Transparent)
@@ -1378,11 +1558,61 @@ func (ui *mainUI) setEmptyLyrics(message string) {
 	ui.lyricsBox.Refresh()
 }
 
+// setEmptyLyricsWithRetry shows the empty-state message plus a "Retry" button
+// that re-runs the lyrics lookup for the currently-loaded track. Used when
+// the first fetch came back empty (no LRC, no embedded tag, nothing on
+// LRCLIB) so the user can re-attempt after they're back online or after
+// LRCLIB has been updated. The cached negative result is invalidated before
+// the new lookup so the same empty answer can't short-circuit the retry.
+func (ui *mainUI) setEmptyLyricsWithRetry(message string) {
+	ui.lyricsLines = nil
+	ui.currentLyric = -1
+	ui.lyricsBox.RemoveAll()
+
+	t := canvas.NewText(message, colorTextDim)
+	t.TextSize = 13
+	t.Alignment = fyne.TextAlignCenter
+
+	retryBtn := widget.NewButtonWithIcon("Retry lookup", theme.ViewRefreshIcon(), func() {
+		info := ui.eng.Info
+		if info == nil {
+			return
+		}
+		// Drop the cached empty result and re-query. Use the same search
+		// title that FetchLyrics derives (track-number prefix stripped from
+		// the tag title, falling back to the filename base).
+		artist := info.Artist
+		title := info.Title
+		if title == "" {
+			title = strings.TrimSuffix(filepath.Base(info.Path), filepath.Ext(info.Path))
+		}
+		audio.ClearLyricsCacheFor(artist, title)
+
+		ui.lyricsToken++
+		tok := ui.lyricsToken
+		ui.setEmptyLyrics("Searching for lyrics…")
+		go func(info *audio.FileInfo, tok int) {
+			lines := audio.FetchLyrics(info)
+			fyne.Do(func() {
+				if tok != ui.lyricsToken {
+					return
+				}
+				ui.setLyrics(lines)
+			})
+		}(info, tok)
+	})
+	retryBtn.Importance = widget.LowImportance
+
+	ui.lyricsBox.Add(t)
+	ui.lyricsBox.Add(container.NewCenter(retryBtn))
+	ui.lyricsBox.Refresh()
+}
+
 // setLyrics replaces the panel contents with the given lines, prepared for
 // position-driven highlighting (synced) or static display (plain).
 func (ui *mainUI) setLyrics(lines []audio.LyricLine) {
 	if len(lines) == 0 {
-		ui.setEmptyLyrics("No lyrics found")
+		ui.setEmptyLyricsWithRetry("No lyrics found")
 		return
 	}
 	ui.lyricsLines = lines
@@ -1399,22 +1629,32 @@ func (ui *mainUI) setLyrics(lines []audio.LyricLine) {
 }
 
 // Lyric styling constants — keep activation/deactivation visually consistent.
+//
+// Sizes are calibrated for an "Apple Music desktop" feel: active line is
+// dramatically larger than the surrounding idle lines so it commands focus
+// even when the panel is glanced at from across the room. Adjacent lines
+// take a middle size (lyricSizeNear) so the transition between idle and
+// active doesn't feel like a hard step.
 const (
 	lyricSizeIdle      float32 = 14
-	lyricSizeActive    float32 = 16
-	lyricAnimDur               = 220 * time.Millisecond
-	lyricScrollDur             = 380 * time.Millisecond
-	lyricLineHeightHint        = float32(28)
+	lyricSizeNear      float32 = 16
+	lyricSizeActive    float32 = 22
+	lyricAnimDur               = 200 * time.Millisecond
+	lyricScrollDur             = 420 * time.Millisecond
+	lyricLineHeightHint        = float32(32)
 )
 
 // updateLyricsPosition highlights the line whose timestamp matches the current
 // playback position and scrolls it into view. No-op for plain (unsynced)
 // lyrics — those just sit there.
 //
-// Transitions are animated:
-//   - The new active line fades dim → accent and grows 14 → 16 over ~220 ms.
-//   - The previously-active line reverses the same animation.
-//   - The scroll smoothly glides to center the new line (~380 ms).
+// Visual treatment (depth-of-field, Apple-Music-inspired):
+//   - The new active line fades to the album's accent color, bolds, and grows
+//     to lyricSizeActive (22 px).
+//   - Lines immediately above/below (±1) take an intermediate size and full
+//     white color, so the transition into the active band is smooth.
+//   - Everything else relaxes back to colorTextDim @ lyricSizeIdle.
+//   - The scroll glides to center the active line in the viewport.
 //
 // Any animations still in flight from the previous line change are stopped
 // before new ones start, so rapid line changes can't pile up.
@@ -1442,16 +1682,40 @@ func (ui *mainUI) updateLyricsPosition(posSec float64) {
 
 	ui.stopLyricAnims()
 
-	if prev >= 0 && prev < len(ui.lyricsBox.Objects) {
-		if t, ok := ui.lyricsBox.Objects[prev].(*canvas.Text); ok {
-			t.TextStyle = fyne.TextStyle{} // unbold immediately; color/size animate
-			ui.animateLineTo(t, colorTextDim, lyricSizeIdle)
+	// Build the set of lines whose visual state changes this cycle: the new
+	// active, its ±1 neighbors, plus the previously-active and ITS neighbors
+	// so they relax back to idle as the focus moves. Using a set avoids
+	// double-animating the same line when prev and idx are adjacent.
+	touched := map[int]struct{}{}
+	for _, i := range []int{prev - 1, prev, prev + 1, idx - 1, idx, idx + 1} {
+		if i >= 0 && i < len(ui.lyricsBox.Objects) {
+			touched[i] = struct{}{}
 		}
 	}
-	if idx >= 0 && idx < len(ui.lyricsBox.Objects) {
-		if t, ok := ui.lyricsBox.Objects[idx].(*canvas.Text); ok {
+
+	// Accent for the active line follows the album's dominant color when
+	// available, falling back to the static green so first-frame loads still
+	// have a highlight.
+	activeCol := color.Color(colorAccent)
+	if ui.currentAccent.A != 0 {
+		activeCol = brighten(ui.currentAccent, 0.45)
+	}
+
+	for i := range touched {
+		t, ok := ui.lyricsBox.Objects[i].(*canvas.Text)
+		if !ok {
+			continue
+		}
+		switch i {
+		case idx:
 			t.TextStyle = fyne.TextStyle{Bold: true}
-			ui.animateLineTo(t, colorAccent, lyricSizeActive)
+			ui.animateLineTo(t, activeCol, lyricSizeActive)
+		case idx - 1, idx + 1:
+			t.TextStyle = fyne.TextStyle{}
+			ui.animateLineTo(t, colorText, lyricSizeNear)
+		default:
+			t.TextStyle = fyne.TextStyle{}
+			ui.animateLineTo(t, colorTextDim, lyricSizeIdle)
 		}
 	}
 
@@ -1529,4 +1793,32 @@ func (ui *mainUI) animateScrollTo(y float32) {
 	anim.Curve = fyne.AnimationEaseInOut
 	anim.Start()
 	ui.scrollAnim = anim
+}
+
+// refreshModeLabel updates the audio output mode indicator in the time row.
+// Exclusive follows the current track's accent (brightened for legibility on
+// a dark background); shared stays dim gray. Updates every ticker tick and
+// every track load so the color stays in sync with the album art.
+func (ui *mainUI) refreshModeLabel(eng *audio.Engine) {
+	mode := eng.OutputMode()
+	var text string
+	var col color.Color
+	switch mode {
+	case "exclusive":
+		text = "EXCLUSIVE"
+		if ui.currentAccent.A != 0 {
+			col = brighten(ui.currentAccent, 0.45)
+		} else {
+			col = colorAccent
+		}
+	case "shared":
+		text = "SHARED"
+		col = colorTextDim
+	default:
+		text = ""
+		col = colorTextDim
+	}
+	ui.modeLabel.Text = text
+	ui.modeLabel.Color = col
+	ui.modeLabel.Refresh()
 }

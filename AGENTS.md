@@ -74,6 +74,14 @@ choco install mingw -y     # Administrator shell
 
 After installing, the new GCC takes priority — verify with `gcc --version`.
 
+### Distributing to another Windows PC (UCRT gotcha)
+
+The MinGW-w64 15.x toolchain links against the **Universal C Runtime** — the .exe imports `api-ms-win-crt-*.dll`. Those ship with Win11 and Win10 ≥ 1809 but are missing on older Win10 installs without recent Windows Updates. Symptom: the .exe silently fails to launch on the target PC.
+
+Fix on the target machine: install **VC++ Redistributable 2015-2022 (x64)** (`https://aka.ms/vs/17/release/vc_redist.x64.exe`) — it bundles UCRT. One-time install, every subsequent rebuild works.
+
+`-extldflags=-static` in `-ldflags` does NOT solve this: MinGW-UCRT has no static UCRT library because UCRT is a Windows system component, not a user-space library. The only build-side fix is switching to a MSVCRT-based MinGW (`pacman -S mingw-w64-x86_64-toolchain` in MSYS2), which produces a .exe that works on every Windows from XP onward at the cost of swapping toolchains. Not the default here.
+
 The Windows .exe icon comes from `resource_windows_amd64.syso`, which `go build` links automatically. To regenerate (after replacing the icon):
 
 ```powershell
@@ -186,7 +194,11 @@ When you change anything in `audio/`, listen for:
 - LRCLIB returns HTTP 404 when a song isn't in their database. The cache stores empty strings for negative results so we don't keep hammering the API for songs that will never be there.
 - LRCLIB sometimes returns the LRC of a *different release* of the same song (single vs album vs remaster) when durations are within its own tolerance — the result loads cleanly but plays out of sync. `audio/lyrics.go` checks the returned record's duration against the file's and falls back to `/api/search` for a closer match when the delta exceeds `lrclibDurationToleranceSec` (2.5 s). The cache key carries a `lyricsCacheVersion` namespace — bump it whenever the matching logic changes so existing wrong-version cached entries get refetched.
 - `fyne.Container.NewBorder(top, bottom, left, right, center)` — the **center** child is what expands. The right column uses this to keep controls at the bottom and let the album art fill the rest of the height.
-- Fyne's `canvas.NewColorRGBAAnimation` / `fyne.NewAnimation` callbacks already run on the UI thread, so don't wrap them in `fyne.Do` — but DO stop any in-flight animation before starting a new one on the same object, otherwise rapid line changes pile up and flicker. See `mainUI.stopLyricAnims`.
+- **`window.Resize()` taller than the screen's working area gets silently clamped by Windows, and if the content `MinSize` is close to that clamp the user can't shrink the window vertically.** The default size is `1080×720` deliberately — it fits a 1366×768 laptop with taskbar. Bumping the title size, padding, or the album-art MinSize all push the content `MinSize` up, eventually trapping users on small screens with an un-resizable window. If you increase any of those (especially `artBg.SetMinSize` / `artImage.SetMinSize`, currently 180×180), test on a small display before shipping.
+- **`canvas.Image` with `FillMode = ImageFillContain` inside `container.NewCenter` is constrained to its `MinSize`, NOT to the available space.** That's why the album art uses a custom `squareCenterLayout` (in `ui/window.go`) instead of `NewCenter`: the custom layout sizes children to the largest square that fits (`min(width, height)` of the parent) and centers them, so the cover grows with the window while keeping its aspect ratio. `NewCenter` alone leaves the art frozen at the MinSize regardless of how big the window gets.
+- Fyne's `canvas.NewColorRGBAAnimation` / `fyne.NewAnimation` callbacks already run on the UI thread, so don't wrap them in `fyne.Do` — but DO stop any in-flight animation before starting a new one on the same object, otherwise rapid line changes pile up and flicker. See `mainUI.stopLyricAnims`. The lyric depth-of-field cycle animates a small *set* of lines per transition (active + ±1 + previous-active + previous-±1, deduped via a map); stopping in-flight anims and rebuilding the set keeps the transitions visually continuous even when the user seeks through several lines quickly.
+- **`widget.List.Refresh()` repaints rows via `UpdateItem` but does NOT update Fyne's row-hover/selection rectangle.** The selection (the gray highlighted-row visual that Fyne paints on top of UpdateItem's output) only moves when the user clicks OR when code calls `widget.List.Select(rowID)`. So after a programmatic `pl.SetCurrent(i)` — auto-advance, prev/next, crossfade — you have to call BOTH `Refresh()` (for the `▸` prefix + accent color) AND `Select(rowID)` (for the system hover). The helper `syncListSelection()` does both, with `realToRow()` translating the canonical playlist index through any active search filter and `UnselectAll()` when the current track is filtered out. **Watch out: `List.Select(id)` synchronously fires `OnSelected`**, which would re-enter `loadAndPlay` and loop forever. The `suppressSelect bool` flag on `mainUI` short-circuits OnSelected during programmatic selection.
+- **`canvas.LinearGradient` with `EndColor` alpha 0 inside `container.NewStack`** has been reported to cause subtle mouse-position drift on Windows in Fyne 2.7.x. The right-column ambient backdrop uses this pattern — if a user reports "the mouse desyncs from the UI by a few pixels", first verify by temporarily replacing `container.NewStack(ui.bgGradient, ...)` with just the inner border container; if the issue disappears, refactor the backdrop to a `canvas.Rectangle` with a solid `FillColor` tinted to the dominant hue (loses the gradient feel but is hit-test-stable). Also check Windows DPI scaling — Fyne 2.7.x has separate known issues with custom widgets at non-100 % DPI; `setx FYNE_SCALE 1.0` is the standard escape hatch.
 
 ## Files at a glance
 
@@ -215,7 +227,10 @@ audio/
                       Year/TrackNum/Lyrics/Picture
   lyrics.go           .lrc / embedded / LRCLIB chain + disk cache + LRC parser;
                       [offset:±N] honored; LRCLIB matching falls back to /api/search
-                      when /api/get returns a wrong-duration release; v4 cache namespace;
+                      when /api/get returns a wrong-duration release; v5 cache namespace
+                      embedded in the SHA-1 hash key (so version bumps invalidate cleanly,
+                      no orphan subdirs); ClearLyricsCacheFor(artist, title) exposed for
+                      the UI's manual "Retry lookup" button to invalidate one entry;
                       track-number prefix stripping (matches "09 - Song.flac" style)
   visualizer.go       Sample ring + Push() (audio-thread) + Snapshot() FFT (unused by UI)
                       + Waveform() peak envelope (used by waveformWidget)
@@ -233,16 +248,36 @@ playlist/
                       crossfade preload.
 
 ui/
-  theme.go            Custom dark theme (Spotify-ish green accent, tuned typography)
+  theme.go            Custom dark theme (Spotify-ish green accent, 28 px heading,
+                      8 px padding — drives the look when no album art is present)
+  dominant.go         Dominant-color extractor for album art: decodes PNG/JPEG/GIF
+                      bytes, samples on a 64×64 grid, discards near-black/white/
+                      low-saturation pixels, weighted-histogram of the rest, returns
+                      the centroid of the heaviest bucket as the accent. Plus
+                      tint(c, alpha) and brighten(c, t) helpers used for the
+                      gradient backdrop and the brightened text/waveform accents.
   window.go           Fyne layout, three-tab left sidebar (Playlist / Albums /
                       Artists via container.AppTabs), transport (prev/play/next/
                       stop + shuffle/repeat with white-icon dot indicators), seek-
                       able progress slider with updatingUI guards on BOTH OnChanged
-                      and OnChangeEnded (see footguns), click-to-seek waveform,
-                      keyboard shortcuts (Space, arrows, S/R/L, Ctrl+F, Del,
-                      Ctrl+Shift+arrows, Ctrl+arrows), playlist search bar with
-                      live filter (index remap), animated lyrics panel, menu
-                      (File: Open/Set Music Root/Rescan/Clear; Edit: Search/
+                      and OnChangeEnded (see footguns), EXCLUSIVE/SHARED mode label
+                      in the time row (Engine.OutputMode atomic), click-to-seek
+                      waveform with album-tinted glow, keyboard shortcuts (Space,
+                      arrows, S/R/L, Ctrl+F, Del, Ctrl+Shift+arrows, Ctrl+arrows),
+                      playlist search bar with live filter (index remap),
+                      syncListSelection() that keeps widget.List's hover-row in
+                      sync with pl.Current across auto-advance / next / prev /
+                      crossfade (also handles the OnSelected re-entry trap via
+                      a suppressSelect flag), realToRow() inverse of rowToReal
+                      for filter-aware row lookup, custom squareCenterLayout for
+                      responsive square album art, applyAccent() that drives the
+                      ambient bg gradient + format label + EXCLUSIVE label +
+                      waveform glow from the extracted dominant color,
+                      setEmptyLyricsWithRetry showing the "Retry lookup" button
+                      after a failed fetch (invalidates cache via
+                      audio.ClearLyricsCacheFor and re-queries), depth-of-field
+                      lyrics animation (active 22 px / near 16 px / idle 14 px),
+                      menu (File: Open/Set Music Root/Rescan/Clear; Edit: Search/
                       Move/Remove/Crossfade toggle/Exclusive toggle), waveform
                       animation loop, drag-and-drop, OnTrackTransition handler
                       that updates UI WITHOUT calling Load

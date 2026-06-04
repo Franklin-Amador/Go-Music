@@ -176,7 +176,6 @@ func fetchLRCLib(artist, title, album string, durationSec float64) string {
 		}
 	}
 
-	lyricsCachePut(key, "")
 	return ""
 }
 
@@ -292,7 +291,7 @@ func lrclibDoJSON(rawURL string, out interface{}) (interface{}, bool) {
 // every existing cached entry — used when the matching logic changes (e.g.
 // added duration-aware /api/search fallback) so users automatically get
 // fresh, better-matched lyrics instead of the stale wrong-version cache.
-const lyricsCacheVersion = "v4"
+const lyricsCacheVersion = "v5"
 
 func lyricsCacheKey(artist, title string) string {
 	h := sha1.New()
@@ -331,6 +330,21 @@ func lyricsCachePut(key, data string) {
 	}
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, key+".txt"), []byte(data), 0o644)
+}
+
+// ClearLyricsCacheFor drops the cached lyrics entry for the given artist+title
+// pair so the next FetchLyrics call re-queries LRCLIB from scratch. Used to
+// implement a manual "retry" button in the UI: without this, a previously
+// cached empty result would short-circuit every retry attempt.
+//
+// Silent no-op when no cache entry exists or the cache dir is unavailable —
+// callers don't need to react.
+func ClearLyricsCacheFor(artist, title string) {
+	dir := lyricsCacheDir()
+	if dir == "" {
+		return
+	}
+	_ = os.Remove(filepath.Join(dir, lyricsCacheKey(artist, title)+".txt"))
 }
 
 // ── Parsing ──────────────────────────────────────────────────────────────────

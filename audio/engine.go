@@ -155,6 +155,11 @@ type Engine struct {
 	// Windows mixer / resampler). Default false = try exclusive first.
 	exclusiveDisabled atomic.Bool
 
+	// outputModeAtomic records which backend is currently active:
+	// 0 = not yet opened, 1 = exclusive (malgo), 2 = shared (oto).
+	// Written once per openPlayer call; read lock-free by the UI ticker.
+	outputModeAtomic atomic.Int32
+
 	// ── Crossfade ────────────────────────────────────────────────────────
 	// Stored as milliseconds for cheap atomic loads from the audio thread.
 	// 0 means crossfading is disabled — pcmReader runs its original fast
@@ -476,6 +481,20 @@ func (e *Engine) SetExclusiveMode(enabled bool) {
 // the current player is actually using).
 func (e *Engine) ExclusiveMode() bool {
 	return !e.exclusiveDisabled.Load()
+}
+
+// OutputMode returns which audio backend is currently active: "exclusive"
+// when malgo holds the device directly, "shared" when oto is routing
+// through the Windows mixer, or "" before the first track is opened.
+func (e *Engine) OutputMode() string {
+	switch e.outputModeAtomic.Load() {
+	case 1:
+		return "exclusive"
+	case 2:
+		return "shared"
+	default:
+		return ""
+	}
 }
 
 // SetCrossfade configures the crossfade duration in seconds. Pass 0 to
@@ -1005,10 +1024,12 @@ func (e *Engine) openPlayer(r io.Reader) (audioPlayer, error) {
 			return nil, err
 		}
 		log.Printf("audio: WASAPI shared mode (exclusive disabled by user)")
+		e.outputModeAtomic.Store(2)
 		return e.otoCtx.NewPlayer(r), nil
 	}
 	if p, err := newExclusivePlayer(r); err == nil {
 		log.Printf("audio: WASAPI exclusive mode active")
+		e.outputModeAtomic.Store(1)
 		return p, nil
 	}
 	// Exclusive failed — fall back to oto shared mode.
@@ -1016,6 +1037,7 @@ func (e *Engine) openPlayer(r io.Reader) (audioPlayer, error) {
 		return nil, err
 	}
 	log.Printf("audio: WASAPI shared mode (exclusive unavailable)")
+	e.outputModeAtomic.Store(2)
 	return e.otoCtx.NewPlayer(r), nil
 }
 

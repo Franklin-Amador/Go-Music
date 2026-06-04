@@ -38,6 +38,7 @@ For album / artist browsing, use `File → Set Music Root…` to point at the to
 ### Audio quality
 
 - **Bit-perfect WASAPI exclusive mode** via `malgo` / miniaudio. The engine tries exclusive first; on success the 176.4 kHz output goes straight to the DAC with no Windows mixer in the path. Falls back to oto shared mode automatically if the device rejects exclusive or another app holds it. User-controllable from `Edit → Exclusive mode: on/off` — turn it off when you want YouTube/Discord/system sounds to mix alongside.
+- **Output-mode indicator in the UI.** A small `EXCLUSIVE` / `SHARED` label sits in the progress row (next to the elapsed-time counter) so the user can tell at a glance whether they're getting bit-perfect output or routed through the Windows mixer — no need to read the log to find out. The label follows the current track's accent color when exclusive, dim gray when shared.
 - **Bit-clean DSD pipeline.** Single-stage decimating Kaiser FIR at the DSD bit rate — no second resampling stage, no audible alias noise. See [_DSD path_](#dsd-path-the-audiophile-path).
 - **High-quality PCM resampling.** Polyphase Kaiser-sinc resampler, parallelized across all CPU cores.
 - **Hearing-safety chain.** Per-channel DC blocker, soft-knee limiter, and a 25 kHz brick-wall reconstruction filter for DSD. See [_Safety_](#safety-hearing-and-dac-protection).
@@ -46,7 +47,7 @@ For album / artist browsing, use `File → Set Music Root…` to point at the to
 ### Playback & metadata
 
 - **All-format metadata.** Title / artist / album / album-artist / year / track number / album art / lyrics extracted from FLAC, MP3, WAV, and DSF (via ID3v2 at the DSF metadata offset).
-- **Synced lyrics with animation.** Local `<song>.lrc` → embedded tags → [lrclib.net](https://lrclib.net) (cached on disk). LRCLIB matching prefers the variant whose track duration is closest to the file's, so remasters/singles/album cuts don't deliver out-of-sync lyrics. The active line eases color, size, and scroll position rather than snapping.
+- **Synced lyrics with depth-of-field animation.** Local `<song>.lrc` → embedded tags → [lrclib.net](https://lrclib.net) (cached on disk). LRCLIB matching prefers the variant whose track duration is closest to the file's, so remasters/singles/album cuts don't deliver out-of-sync lyrics. The active line eases dramatically into focus (14 → 22 px, bold, accent-coloured), the lines immediately above and below take an intermediate size (16 px white), and everything else stays at the relaxed idle size — an Apple-Music-style focus effect that reads cleanly even from across the room. If the fetch comes back empty (offline, LRCLIB miss), a **Retry lookup** button appears so the user can try again without re-loading the track.
 - **Latency-compensated playback position.** Position reporting subtracts the player's `BufferedSize()` so synced lyrics align with what the DAC is actually emitting, not what's been handed downstream. In exclusive mode the buffer is ~5 ms so this is barely measurable; in shared mode it's ~200 ms and the compensation is what keeps the lyrics frame-accurate.
 - **Animated waveform visualizer.** A continuous mirrored peak-envelope line drawn under the album art, with a soft glow halo and temporal smoothing — pulls the latest ~38 ms of audio from the visualizer ring at 30 fps. Tap or click on it to seek. See [_Visualizer_](#visualizer).
 - **Seek for both PCM and DSD.** Click or drag the progress bar OR click anywhere on the waveform. PCM jumps the in-memory read position instantly; DSD restarts the decoder at the closest block boundary to the target time (under one second in practice).
@@ -73,8 +74,10 @@ For album / artist browsing, use `File → Set Music Root…` to point at the to
 
 ### Look
 
-- **Responsive UI.** Album art expands to fill any vertical space the window gives it; playlist / library tabs + collapsible lyrics panel sit beside.
-- **Custom dark theme** with a Spotify-ish accent green and tuned typography.
+- **Responsive UI.** Album art uses a custom square-fit layout (`squareCenterLayout` in `ui/window.go`) so the cover grows to the largest square that fits inside the player column, maintaining aspect ratio as the window resizes. Playlist / library tabs + collapsible lyrics panel sit beside it.
+- **Album-derived dynamic accent.** When a track loads, the dominant hue of its album art is extracted (saturation-weighted histogram on a 64×64 sample grid — see `ui/dominant.go`) and applied to the quality label, the `EXCLUSIVE` indicator, the waveform glow, and the active lyrics line. A subtle vertical gradient of the same hue at ~14 % alpha sits behind the player column as an ambient backdrop. The whole UI quietly "vibrates with" the current track instead of being monochromatic.
+- **Playlist auto-tracks the player.** The visible selection in the playlist follows whichever song is actually playing — when a track auto-advances, when the user hits next/prev, or when a crossfade transitions to the preloaded next track. No more clicking around to figure out what's on.
+- **Custom dark theme** with a Spotify-ish accent green (used as the fallback when no album art is present) and tuned typography (28 px bold title, 16 px artist line, generous padding).
 
 ## Architecture
 
@@ -167,9 +170,15 @@ Three-step fallback chain, runs asynchronously after a track loads (never blocks
 
 1. **Local `<song>.lrc` file** next to the audio file — standard karaoke format, synced. The `[offset:±N]` tag is honored (positive offset shifts every line earlier).
 2. **Embedded tags** inside the file — USLT for MP3 / DSF (via ID3v2 at the DSF metadata offset), LYRICS for FLAC.
-3. **[lrclib.net](https://lrclib.net) API** — free, no auth, huge coverage. Matching is duration-aware: `/api/get` is tried first, and if the returned record's duration deviates more than 2.5 s from ours, `/api/search` is queried and the closest-duration record with `syncedLyrics` is selected. This avoids the common case where a remaster/single/album-cut record matches by name but the LRC was synced to a different release. Results (positive and negative) are cached on disk under `%LocalAppData%\gomusic\lyrics\`. The cache key is namespaced (`v2`) so changes to matching logic auto-invalidate stale entries.
+3. **[lrclib.net](https://lrclib.net) API** — free, no auth, huge coverage. Matching is duration-aware: `/api/get` is tried first, and if the returned record's duration deviates more than 2.5 s from ours, `/api/search` is queried and the closest-duration record with `syncedLyrics` is selected. This avoids the common case where a remaster/single/album-cut record matches by name but the LRC was synced to a different release. Results (positive and negative) are cached on disk under `%LocalAppData%\gomusic\lyrics\`. The cache key embeds a version tag (currently `v5`) inside the SHA-1 hash, so bumping the matching logic auto-invalidates every existing entry without leaving orphan subdirectories behind. A negative result (no lyrics found) caches the empty string so we don't re-hit LRCLIB on every replay — and the UI exposes a **Retry lookup** button next to the "No lyrics found" message that clears that specific cache entry and re-queries, so the user can recover after going from offline back to online without re-loading the track.
 
-The UI shows lyrics in a right-side collapsible panel. The active line animates dim → accent and 14 → 16 px over ~220 ms (ease-out), the previous line reverses the same motion, and the viewport scrolls smoothly (~380 ms, ease-in-out) to keep the active line centered. In-flight animations are stopped when a new line change arrives, so rapid transitions stay continuous without piling up.
+The UI shows lyrics in a right-side collapsible panel with a depth-of-field effect:
+
+- Active line: **22 px bold**, coloured with the current track's accent (extracted from the cover) — the focal point.
+- Adjacent lines (±1 of the active): **16 px white** — a soft transition zone so the size change isn't a hard step.
+- Everything else: **14 px dimmed gray** — relaxed, out-of-focus context.
+
+Transitions ease over ~200 ms (ease-out) and the viewport glides smoothly (~420 ms, ease-in-out) to keep the active line centred. In-flight animations are stopped when a new line change arrives, so rapid transitions stay continuous without piling up.
 
 For plain lyrics, the whole text is shown statically.
 
@@ -237,6 +246,20 @@ Then:
 go build -ldflags="-H windowsgui -s -w" -o gomusic.exe .
 ```
 
+### Running on another PC (especially Windows 10)
+
+The MinGW-w64 15.x toolchain links against the **Universal C Runtime (UCRT)**, so the resulting `gomusic.exe` imports `api-ms-win-crt-*.dll`. These ship with Windows 11 and recent Windows 10 builds (≥ 1809) but are missing from older Win10 installs and the .exe will silently fail to launch there.
+
+Fix on the target machine: install the **Microsoft Visual C++ Redistributable 2015-2022 (x64)** — it bundles UCRT and is the same redist most installers ship today.
+
+```
+https://aka.ms/vs/17/release/vc_redist.x64.exe
+```
+
+A one-time install is enough. After a reboot the same `gomusic.exe` runs without rebuilding.
+
+(For fully self-contained distribution, switch the toolchain to the MSVCRT-based MinGW-w64 in MSYS2 — `pacman -S mingw-w64-x86_64-toolchain` — which produces a .exe that depends only on DLLs present in every Windows since XP. Requires no UCRT install on the target. Not the default here because the Chocolatey-installed MinGW is the path of least friction for the developer machine.)
+
 The Explorer / Start-menu `.exe` icon is embedded via `resource_windows_amd64.syso` (generated once with `rsrc -ico ui/go_music_icon_1.ico -arch amd64 -o resource_windows_amd64.syso`).
 
 The in-app window/title-bar icon is a separate **PNG** (`ui/go_music_icon_1.png`), `//go:embed`-ed and applied via `app.SetIcon` / `window.SetIcon`. Fyne renders icons via Go's `image.Decode`, which has no `.ico` support in stdlib — passing `.ico` bytes paints a black rectangle. The PNG is generated once from the `.ico` with PowerShell:
@@ -273,8 +296,11 @@ audio/
   metadata.go         Tag + album-art extraction (dhowden/tag, with DSF offset path).
                       Public ReadMetadata + ReadFileMetadata (DSD-aware via ParseDSD)
   lyrics.go           .lrc / embedded / LRCLIB chain (duration-aware /api/search
-                      fallback, [offset:±N] honored, v4 cache namespace,
-                      track-number prefix stripping for "09 - Song.flac" style names)
+                      fallback, [offset:±N] honored, v5 cache namespace embedded
+                      in the SHA-1 hash so version bumps auto-invalidate without
+                      leaving orphan subdirs, ClearLyricsCacheFor for the UI's
+                      manual "Retry lookup" path, track-number prefix stripping
+                      for "09 - Song.flac" style names)
   visualizer.go       Sample ring + Waveform() peak envelope + radix-2 FFT (latter
                       unused by UI but retained for reuse)
 
@@ -293,18 +319,32 @@ playlist/
                       keyboard reordering
 
 ui/
-  theme.go            Custom dark theme
+  theme.go            Custom dark theme (Spotify-ish green accent, 28 px heading,
+                      8 px padding — fallback theme when no album art is loaded)
+  dominant.go         Album-art dominant-color extractor: decodes the cover bytes,
+                      samples on a 64×64 grid, discards near-black/white/gray
+                      pixels, weights remaining samples by saturation, and returns
+                      the centroid of the heaviest histogram bucket. Plus tint()
+                      and brighten() helpers for the gradient / accent overlays.
+                      Drives the album-aware theming across the player.
   window.go           Fyne layout, three-tab left sidebar (Playlist / Albums /
                       Artists via container.AppTabs), transport (prev/play/next/
                       stop + shuffle + repeat with dot indicators), seek-able
-                      progress slider, click-to-seek waveform, keyboard shortcuts
-                      (Space, arrows, S/R/L, Ctrl+F, Del, Ctrl+Shift+arrows,
-                      Ctrl+arrows), playlist search bar (live filter with index
-                      remap), animated lyrics panel, menu (File: Open / Set Music
-                      Root / Rescan / Clear; Edit: Search / Move / Remove /
-                      Crossfade toggle / Exclusive toggle), waveform animation
-                      loop, drag-and-drop, inline SVG icons (white fill so Fyne
-                      can't tint them with the accent color)
+                      progress slider with EXCLUSIVE/SHARED mode indicator,
+                      click-to-seek waveform whose glow tints with the album,
+                      keyboard shortcuts (Space, arrows, S/R/L, Ctrl+F, Del,
+                      Ctrl+Shift+arrows, Ctrl+arrows), playlist search bar (live
+                      filter with index remap), depth-of-field animated lyrics
+                      panel with Retry-lookup button, syncListSelection that
+                      keeps the visible playlist row aligned with pl.Current
+                      across auto-advance / next / prev / crossfade, custom
+                      squareCenterLayout for responsive album-art sizing,
+                      vertical canvas.LinearGradient backdrop in the right
+                      column driven by the dominant color, menu (File: Open /
+                      Set Music Root / Rescan / Clear; Edit: Search / Move /
+                      Remove / Crossfade toggle / Exclusive toggle), waveform
+                      animation loop, drag-and-drop, inline SVG icons (white
+                      fill so Fyne can't tint them with the accent color)
   library.go          Albums tab (widget.GridWrap of cover thumbnails with
                       fixed-size cells via container.NewGridWrap, in-memory
                       coverResource cache to avoid re-decoding on scroll),
@@ -334,11 +374,15 @@ main.go                       Entry point — calls ui.Run()
 ## Roadmap
 
 - [x] WASAPI exclusive mode for bit-perfect output (via malgo / miniaudio)
+- [x] On-screen indicator of exclusive vs. shared mode
 - [x] Persisted playlist across sessions
 - [x] Seek support for DSD (block-aligned producer restart)
 - [x] PCM crossfade
 - [x] Library view (album / artist browsing)
 - [x] System media keys + keyboard shortcuts
+- [x] Album-derived dynamic theming (accent color, ambient backdrop, depth-of-field lyrics)
+- [x] Auto-tracking playlist selection (visible row follows the player across every transition)
+- [x] Manual lyrics retry button (recover from offline / LRCLIB miss without re-loading)
 - [ ] Native DSD output via DoP for compatible DACs
 - [ ] Streaming PCM resample (don't block load on long FLACs)
 - [ ] Per-band parametric EQ

@@ -191,6 +191,34 @@ func edgeFade(i, n int) float32 {
 	return 1
 }
 
+// SetAccent retints the waveform with the given hue. The glow layer uses the
+// hue at ~33 % alpha; the sharp layer uses a brightened version near white so
+// it stays readable against any extracted album color. Pass color.Transparent
+// (or any zero-alpha color) to restore the default green accent.
+func (w *waveformWidget) SetAccent(c color.NRGBA) {
+	glow := colorWaveGlow
+	sharp := colorWaveSharp
+	if c.A != 0 {
+		glow = color.NRGBA{R: c.R, G: c.G, B: c.B, A: 0x55}
+		// Lift toward white so the sharp wave reads as "bright accent",
+		// not "muddy mid-tone of cover".
+		sharp = brighten(color.NRGBA{R: c.R, G: c.G, B: c.B, A: 0xff}, 0.55)
+	}
+	for _, l := range w.glowTop {
+		l.StrokeColor = glow
+	}
+	for _, l := range w.glowBot {
+		l.StrokeColor = glow
+	}
+	for _, l := range w.sharpTop {
+		l.StrokeColor = sharp
+	}
+	for _, l := range w.sharpBot {
+		l.StrokeColor = sharp
+	}
+	canvas.Refresh(w)
+}
+
 // SetPosition updates the playback-position cursor to frac (0..1).
 // Pass a negative value to hide the cursor (e.g. nothing loaded).
 // Must be called from the UI goroutine.

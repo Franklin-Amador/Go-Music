@@ -69,15 +69,15 @@ func (gomusicTheme) Icon(n fyne.ThemeIconName) fyne.Resource {
 func (gomusicTheme) Size(n fyne.ThemeSizeName) float32 {
 	switch n {
 	case theme.SizeNamePadding:
-		return 6
-	case theme.SizeNameInnerPadding:
 		return 8
+	case theme.SizeNameInnerPadding:
+		return 10
 	case theme.SizeNameText:
 		return 13
 	case theme.SizeNameHeadingText:
-		return 22
+		return 26
 	case theme.SizeNameSubHeadingText:
-		return 16
+		return 17
 	}
 	return theme.DefaultTheme().Size(n)
 }

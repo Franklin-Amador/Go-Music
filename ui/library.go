@@ -205,7 +205,7 @@ func (ui *mainUI) buildSongsPanel() fyne.CanvasObject {
 		ui.pl.Add(track.Path)
 		ui.pl.SetCurrent(0)
 		ui.applyFilter(ui.searchEntry.Text)
-		ui.listWidget.Refresh()
+		ui.syncListSelection()
 		if t := ui.pl.CurrentTrack(); t != nil {
 			ui.loadAndPlay(t.Path)
 		}
@@ -375,7 +375,7 @@ func (ui *mainUI) confirmLoadAlbum(album *library.Album) {
 	}
 	ui.pl.SetCurrent(0)
 	ui.applyFilter(ui.searchEntry.Text)
-	ui.listWidget.Refresh()
+	ui.syncListSelection()
 	if t := ui.pl.CurrentTrack(); t != nil {
 		ui.loadAndPlay(t.Path)
 	}
