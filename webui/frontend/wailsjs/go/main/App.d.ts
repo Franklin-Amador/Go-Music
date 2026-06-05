@@ -56,6 +56,8 @@ export function Prev():Promise<main.TrackInfo>;
 
 export function Remove(arg1:number):Promise<Array<main.PlaylistTrack>>;
 
+export function RetryLyrics():Promise<void>;
+
 export function SaveConfig():Promise<void>;
 
 export function ScanLibrary(arg1:string):Promise<void>;

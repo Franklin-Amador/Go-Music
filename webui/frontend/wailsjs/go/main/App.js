@@ -110,6 +110,10 @@ export function Remove(arg1) {
   return window['go']['main']['App']['Remove'](arg1);
 }
 
+export function RetryLyrics() {
+  return window['go']['main']['App']['RetryLyrics']();
+}
+
 export function SaveConfig() {
   return window['go']['main']['App']['SaveConfig']();
 }

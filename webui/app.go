@@ -458,6 +458,19 @@ func (a *App) GetSpectrum() []float32 {
 	return a.eng.Vis.Snapshot()
 }
 
+// RetryLyrics invalidates the LRCLIB cache entry for the current track and
+// re-fetches lyrics. Used by the "Retry lookup" button when an automatic
+// fetch comes back empty (offline at load time, LRCLIB miss, etc.).
+func (a *App) RetryLyrics() {
+	if a.eng.Info == nil {
+		return
+	}
+	info := a.eng.Info
+	// Clear by artist+title — same key audio/lyrics.go uses internally.
+	audio.ClearLyricsCacheFor(info.Artist, info.Title)
+	go a.fetchAndEmitLyrics(info)
+}
+
 // PlaySong loads path, adds it to the playlist if absent, and starts playing.
 func (a *App) PlaySong(path string) (*TrackInfo, error) {
 	a.pl.Add(path)

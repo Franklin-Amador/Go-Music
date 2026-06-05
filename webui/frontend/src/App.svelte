@@ -21,7 +21,9 @@
   let dur         = $state(0)
   let volume      = $state(1.0)
   let playlist    = $state<PlaylistTrack[]>([])
-  let lyrics      = $state<LyricLine[]>([])
+  let lyrics       = $state<LyricLine[]>([])
+  let lyricsFetched = $state(false)  // true once the first fetch has returned (empty or not)
+  let lyricsRetrying = $state(false)
   let waveform    = $state<number[]>([])
   let errorMsg    = $state('')
   let loading     = $state(false)
@@ -263,7 +265,7 @@
       switch (e.code) {
         case 'Space':
           e.preventDefault()
-          isPlaying ? pause() : play()
+          togglePlay()
           break
         case 'ArrowRight':
           if (e.ctrlKey) { e.preventDefault(); next() }
@@ -303,9 +305,16 @@
         if (s === 'Playing')  loading = false
       }),
       EventsOn('position-change', (p:{pos:number;dur:number}) => { pos=p.pos; dur=p.dur }),
-      EventsOn('track-change',    (info:TrackInfo) => { track=info; loading=false; errorMsg='' }),
+      EventsOn('track-change',    (info:TrackInfo) => {
+        track=info; loading=false; errorMsg=''
+        lyrics=[]; lyricsFetched=false; lyricsRetrying=false
+      }),
       EventsOn('playlist-updated',(pl:PlaylistTrack[]) => { playlist=pl }),
-      EventsOn('lyrics',          (lines:LyricLine[]|null) => { lyrics=lines??[] }),
+      EventsOn('lyrics', (lines:LyricLine[]|null) => {
+        lyrics = lines ?? []
+        lyricsFetched = true
+        lyricsRetrying = false
+      }),
       EventsOn('audio-error',     (msg:string) => { errorMsg=msg; loading=false; scanning=false }),
       EventsOn('playback-finished',() => { playerState='Stopped'; pos=0 }),
       EventsOn('library-updated', (data:{albums:AlbumData[];artists:string[]}) => {
@@ -350,6 +359,12 @@
   async function play()  { try { await Backend.Play() } catch(e:any) { errorMsg=String(e) } }
   function pause() { Backend.Pause() }
   function stop()  { Backend.Stop() }
+
+  // Single handler — re-evaluates state at click time, not at render time.
+  function togglePlay() {
+    if (playerState === 'Playing') pause()
+    else play()
+  }
 
   async function next() {
     loading=true
@@ -422,6 +437,12 @@
     Backend.SetVolume(volume)
   }
 
+  function retryLyrics() {
+    if (!track) return
+    lyricsRetrying = true
+    Backend.RetryLyrics()
+  }
+
   function toggleShuffle()  { isShuffle=!isShuffle; Backend.SetShuffle(isShuffle) }
   function toggleRepeat()   { isRepeat=!isRepeat;   Backend.SetRepeat(isRepeat) }
   function toggleExclusive(){ isExclPref=!isExclPref; Backend.SetExclusive(isExclPref) }
@@ -434,7 +455,7 @@
 
 <!-- ═══════════════════════════════════════════════════════════════════════════ -->
 
-<div class="layout" class:lyrics-open={showLyrics && lyrics.length > 0}>
+<div class="layout" class:lyrics-open={showLyrics}>
 
   <!-- ════ LEFT SIDEBAR ════════════════════════════════════════════════════ -->
   <aside class="sidebar">
@@ -652,7 +673,7 @@
       <button class="ctrl-btn" onclick={prev} title="Previous" disabled={!playlist.length}>
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
       </button>
-      <button class="play-btn" onclick={isPlaying ? pause : play}
+      <button class="play-btn" onclick={togglePlay}
               title={isPlaying ? 'Pause' : 'Play'}
               disabled={!track && !playlist.length}>
         {#if isPlaying}
@@ -714,32 +735,52 @@
   </main>
 
   <!-- ════ RIGHT LYRICS PANEL ══════════════════════════════════════════ -->
-  {#if showLyrics && lyrics.length > 0}
+  {#if showLyrics}
     <aside class="lyrics-panel">
       <div class="lyrics-header">
         <span>Lyrics</span>
         <button class="lyrics-close" onclick={() => showLyrics=false}>✕</button>
       </div>
-      <div class="lyrics-list">
-        {#each lyrics as line, i}
-          {@const dist = activeLyricIdx >= 0 ? Math.abs(i - activeLyricIdx) : 8}
-          {@const sizes   = ['1.10rem','0.90rem','0.78rem','0.70rem','0.65rem']}
-          {@const opas    = [1, 0.70, 0.42, 0.22, 0.12]}
-          {@const scales  = [1.04, 0.97, 0.93, 0.90, 0.87]}
-          {@const blurs   = [0, 0.6, 1.4, 2.4, 3.2]}
-          {@const d       = Math.min(dist, 4)}
-          <p class="lyric"
-             class:lyric-active={dist === 0}
-             style="
-               font-size:{sizes[d]};
-               opacity:{opas[d]};
-               transform:scale({scales[d]});
-               filter:blur({blurs[d]}px);
-             ">
-            {line.text || '·'}
-          </p>
-        {/each}
-      </div>
+
+      {#if lyrics.length > 0}
+        <div class="lyrics-list">
+          {#each lyrics as line, i}
+            {@const dist = activeLyricIdx >= 0 ? Math.abs(i - activeLyricIdx) : 8}
+            {@const sizes   = ['1.10rem','0.90rem','0.78rem','0.70rem','0.65rem']}
+            {@const opas    = [1, 0.70, 0.42, 0.22, 0.12]}
+            {@const scales  = [1.04, 0.97, 0.93, 0.90, 0.87]}
+            {@const blurs   = [0, 0.6, 1.4, 2.4, 3.2]}
+            {@const d       = Math.min(dist, 4)}
+            <p class="lyric"
+               class:lyric-active={dist === 0}
+               style="font-size:{sizes[d]};opacity:{opas[d]};transform:scale({scales[d]});filter:blur({blurs[d]}px);">
+              {line.text || '·'}
+            </p>
+          {/each}
+        </div>
+      {:else if !track}
+        <div class="lyrics-empty">
+          <span class="lyrics-glyph">♪</span>
+          <p>No track loaded</p>
+        </div>
+      {:else if !lyricsFetched || lyricsRetrying}
+        <div class="lyrics-empty">
+          <div class="loading-dots"><span></span><span></span><span></span></div>
+          <p>{lyricsRetrying ? 'Retrying…' : 'Searching for lyrics…'}</p>
+        </div>
+      {:else}
+        <div class="lyrics-empty">
+          <span class="lyrics-glyph">♪</span>
+          <p class="lyrics-empty-title">No lyrics found</p>
+          <p class="lyrics-empty-sub">LRCLIB had no match, or you were offline.</p>
+          <button class="retry-btn" onclick={retryLyrics}>
+            <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+              <path d="M17.65 6.35A7.958 7.958 0 0012 4a8 8 0 100 16c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+            </svg>
+            Retry lookup
+          </button>
+        </div>
+      {/if}
     </aside>
   {/if}
 
@@ -1186,6 +1227,30 @@
       0 0 60px rgba(var(--accent-rgb), 0.20);
     padding: 0.38rem 1.4rem;
   }
+
+  /* lyrics empty / not-found state */
+  .lyrics-empty {
+    flex: 1;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 0.7rem; padding: 1.5rem; text-align: center;
+    color: var(--muted);
+  }
+  .lyrics-glyph { font-size: 2.2rem; opacity: 0.35 }
+  .lyrics-empty p { font-size: 0.8rem }
+  .lyrics-empty-title { font-weight: 600; color: var(--text); font-size: 0.85rem !important }
+  .lyrics-empty-sub   { color: var(--muted); font-size: 0.72rem !important; max-width: 220px; line-height: 1.5 }
+  .retry-btn {
+    display: flex; align-items: center; gap: 0.4rem;
+    background: var(--accent-08); color: var(--accent);
+    border: 1px solid rgba(var(--accent-rgb), 0.4);
+    padding: 0.45rem 0.9rem; border-radius: 20px;
+    font-size: 0.74rem; font-weight: 600;
+    cursor: pointer; margin-top: 0.4rem;
+    transition: background .15s, transform .15s
+  }
+  .retry-btn:hover { background: var(--accent-15); transform: translateY(-1px) }
+  .retry-btn:active { transform: translateY(0) }
 
   /* error */
   .error-bar {
