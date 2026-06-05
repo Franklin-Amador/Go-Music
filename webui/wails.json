@@ -6,6 +6,13 @@
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
+  "info": {
+    "productName": "Go Music",
+    "productVersion": "0.2.0",
+    "companyName": "Franklin-Amador",
+    "copyright": "Copyright 2026",
+    "comments": "High-resolution audio player — Wails UI"
+  },
   "author": {
     "name": "Franklin-Amador",
     "email": "joelamador55@gmail.com"

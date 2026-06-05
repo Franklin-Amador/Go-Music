@@ -362,7 +362,7 @@
 
   // Single handler — re-evaluates state at click time, not at render time.
   function togglePlay() {
-    if (playerState === 'Playing') pause()
+    if (isPlaying) pause()
     else play()
   }
 
@@ -808,6 +808,11 @@
     --r:       8px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0 }
+
+  /* SVG icons inside buttons MUST NOT intercept pointer events.
+     Otherwise the click target is the <path> and the button's onclick
+     never fires — that was the cause of the play button not pausing. */
+  button svg, button svg * { pointer-events: none }
 
   /* ── root layout — proporciones fluidas ─────────────────────────────── */
   .layout {
