@@ -403,19 +403,42 @@ webui/                        Wails 2 + Svelte 5 UI (branch webui-migration).
                               Separate Go module; imports audio/, playlist/,
                               library/ via `replace gomusic => ../`. Zero changes
                               to the audio engine packages.
-  app.go                      App struct — all bound methods (playlist ops,
-                              transport, settings). Engine callbacks wired to
-                              runtime.EventsEmit. 30 fps waveform ticker.
+  app.go                      App struct — all bound methods (transport, playlist
+                              ops, settings, retry-lyrics, save/load config).
+                              Engine callbacks wired to runtime.EventsEmit.
+                              GetSpectrum + GetWaveform are pull-based: frontend
+                              polls them inside requestAnimationFrame (no ticker
+                              goroutine — that caused jitter under IPC load).
+                              Window title set dynamically to "Artist — Title".
+  config.go                   %APPDATA%\gomusic\config-web.json — volume, playlist
+                              paths + current, exclusive pref, crossfade, shuffle,
+                              repeat, musicRoot. Loaded in startup() before
+                              callbacks wire; saved in shutdown() and on the
+                              frontend's pagehide event.
   library.go                  ScanLibrary, GetLibraryAlbums, GetLibraryArtists,
-                              LoadAlbum. Reads same library.gob as Fyne UI.
+                              GetLibrarySongs (flat list), LoadAlbum (replace
+                              playlist + play). Reads the same library.gob the
+                              Fyne UI writes, so a single scan serves both.
   dominant.go                 Dominant-color extractor ported from ui/dominant.go,
                               no Fyne dependency, returns CSS hex.
-  main.go                     Wails entry point: 1080×720, min 720×500.
-  wails.json                  outputfilename: gomusic-web
-  frontend/src/App.svelte     Svelte 5 (runes). Sidebar left (Playlist / Albums /
-                              Artists), player right. Canvas2D waveform, dynamic
-                              accent from album art, depth-of-field lyrics,
-                              exclusive-mode toggle.
+  main.go                     Wails entry point: 1080×720, min 720×500;
+                              DragAndDrop{EnableFileDrop:true}; default WASAPI
+                              shared mode (exclusive is an explicit user choice).
+  wails.json                  name + outputfilename + info.productName 'Go Music'.
+  build/appicon.png           Window icon (copied from ui/go_music_icon_1.png).
+  build/windows/icon.ico      .exe icon (copied from ui/go_music_icon_1.ico).
+  frontend/src/App.svelte     Svelte 5 (runes). Layout: clamp() responsive grid
+                              — sidebar (Playlist|Songs|Albums|Artists) | player
+                              | optional lyrics panel. Player: art with ambient
+                              glow + reactive box-shadow, FFT spectrum visualizer
+                              with spring physics, smooth waveform overlay,
+                              draggable progress bar (mousedown + window listeners),
+                              transport with SVG icons, accent-color CSS variables
+                              driven by track's dominant color (sidebar/player-bg/
+                              lyrics-panel all tint subtly), depth-of-field lyrics
+                              (inline-style scale/opacity/blur per line distance),
+                              retry-lyrics button on LRCLIB miss, keyboard
+                              shortcuts (Space/←→/Ctrl+←→/↑↓/S/R/L/Esc).
   build/bin/gomusic-web.exe   Built output (~12 MB).
 ```
 
@@ -441,11 +464,14 @@ webui/                        Wails 2 + Svelte 5 UI (branch webui-migration).
 
 ### UI migration — Wails + Svelte 5 (`webui-migration` branch)
 - [x] Fase 1: Wails scaffold, Engine bindings, Hello World binary (gomusic-web.exe)
-- [x] Fase 2: Full transport, playlist, auto-advance, crossfade preload, album art, lyrics, waveform Canvas2D
-- [x] Fase 3: Dynamic accent color, two-column layout, depth-of-field lyrics, ambient glow
-- [x] Fase 3b: Albums tab (grid), Artists tab (list + filter), exclusive-mode toggle
-- [ ] Fase 4: Playlist search, drag-and-drop reorder, keyboard shortcuts, config persistence
+- [x] Fase 2: Full transport, playlist, auto-advance, crossfade preload, album art, lyrics, Canvas2D waveform
+- [x] Fase 3: Dynamic accent color, layout responsive, depth-of-field lyrics, ambient glow
+- [x] Fase 3b: Albums grid, Artists list with filter, Songs tab with search, exclusive toggle
+- [x] Fase 3c: FFT spectrum visualizer with spring physics, smooth waveform overlay
+- [x] Fase 4: Config persistence (config-web.json), keyboard shortcuts, draggable progress bar, dynamic window title, retry-lyrics button (per-track cache invalidation)
+- [x] Fase 4b: Native app icon embedded (ico + window png), pointer-events bug fixes
 - [ ] Fase 5: Media keys (wire existing `ui/mediakeys_windows.go` into Wails startup)
+- [ ] Fase 5b: Drag-and-drop reorder, playlist search, crossfade duration slider
 - [ ] Fase 6: Cutover — delete `ui/`, remove Fyne from go.mod, merge to main
 
 ## Known limitations

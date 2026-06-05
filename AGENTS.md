@@ -231,6 +231,9 @@ When you change anything in `audio/`, listen for:
 - **`widget.List.Refresh()` repaints rows via `UpdateItem` but does NOT update Fyne's row-hover/selection rectangle.** The selection (the gray highlighted-row visual that Fyne paints on top of UpdateItem's output) only moves when the user clicks OR when code calls `widget.List.Select(rowID)`. So after a programmatic `pl.SetCurrent(i)` — auto-advance, prev/next, crossfade — you have to call BOTH `Refresh()` (for the `▸` prefix + accent color) AND `Select(rowID)` (for the system hover). The helper `syncListSelection()` does both, with `realToRow()` translating the canonical playlist index through any active search filter and `UnselectAll()` when the current track is filtered out. **Watch out: `List.Select(id)` synchronously fires `OnSelected`**, which would re-enter `loadAndPlay` and loop forever. The `suppressSelect bool` flag on `mainUI` short-circuits OnSelected during programmatic selection.
 ### Wails UI footguns (webui/)
 
+- **SVG icons inside buttons swallow click events.** When you put `<svg><path/></svg>` inside a `<button onclick={fn}>`, the click target becomes the inner `<path>`, NOT the button — so `onclick` never fires. Symptom: keyboard shortcuts work (they bypass the DOM target) but the visible button does nothing. Fix in a global CSS rule: `button svg, button svg * { pointer-events: none }`. This was the root cause of the play button not pausing in the migration.
+- **`setPointerCapture` in WebView2 swallows subsequent click events.** Using `pointerdown`/`pointermove`/`pointerup` with `setPointerCapture(e.pointerId)` for drag interactions leaves the input feeling "stuck" until the user clicks elsewhere. The seek progress bar tried this and the player visually paused mid-drag. Fix: use `mousedown` to open a transient drag session and attach `mousemove`+`mouseup` listeners to `window`, removing them on `mouseup`. Standard, predictable, works everywhere.
+- **Svelte 5 attribute ternaries with function references are NOT reactive.** `onclick={isPlaying ? pause : play}` captures the value at first render and never updates. Use a single dispatcher: `function togglePlay() { if (isPlaying) pause(); else play() }` and `onclick={togglePlay}`. The function re-evaluates state at click time.
 - **`EnableFileDrop` is NOT a field of `options.App`.** It lives inside a nested `options.DragAndDrop` struct: `DragAndDrop: &options.DragAndDrop{EnableFileDrop: true}`. Putting it at the top level produces a compile error that looks like a typo rather than a wrong nesting level.
 - **Svelte 5 has no event modifiers.** `onclick|stopPropagation` is a parse error. Use `onclick={(e) => { e.stopPropagation(); handler() }}` instead.
 - **Import paths from `frontend/src/` to `frontend/wailsjs/` are ONE `../` up, not two.** `frontend/src/App.svelte` → `../wailsjs/...`. Two levels (`../../wailsjs/`) escapes the `frontend/` directory entirely and Rollup silently fails to resolve the module.
@@ -349,33 +352,55 @@ webui/                       Wails 2 + Svelte 5 UI (branch webui-migration).
                              Separate Go module (go.mod: replace gomusic => ../).
                              audio/, playlist/, library/ are imported read-only;
                              NOT a single line in those packages is modified.
-  app.go                     App struct bound to JS. Methods: LoadFile, Play,
-                             Pause, Stop, Seek, SetVolume, GetVolume,
-                             AddFiles, AddFolder, GetPlaylist, PlayAt, Next,
-                             Prev, Remove, ClearPlaylist, SetShuffle, SetRepeat,
-                             SetExclusive, IsExclusive, SetCrossfade, GetCrossfade,
-                             GetOutputMode, OpenFileDialog, OpenFolderDialog.
-                             Engine callbacks wired to runtime.EventsEmit in
-                             startup(). Waveform 30fps ticker goroutine.
-  library.go                 ScanLibrary (background goroutine + scan-progress
-                             events), GetLibraryAlbums, GetLibraryArtists,
-                             LoadAlbum (replaces playlist + starts play).
-                             Reads/writes same library.gob cache as the Fyne UI.
+  app.go                     App struct bound to JS. Transport (Play/Pause/Stop/
+                             Seek/SetVolume), playlist (AddFiles/AddFolder/PlayAt/
+                             Next/Prev/Remove/ClearPlaylist/PlaySong), settings
+                             (SetShuffle/SetRepeat/SetExclusive/SetCrossfade),
+                             diag (GetOutputMode/IsExclusive/IsShuffle/IsRepeat/
+                             GetVolume/GetCrossfade), file pickers (OpenFile/
+                             OpenFolderDialog), visualization (GetSpectrum,
+                             GetWaveform — pulled by rAF, not pushed by ticker),
+                             lyrics (RetryLyrics with per-track cache invalidation),
+                             persistence (GetInitialState/SaveConfig).
+                             startup(): loads config-web.json BEFORE wiring engine
+                             callbacks (so defaults restored cleanly), emits
+                             playlist-updated for restored tracks, sets dynamic
+                             window title on track-change + OnTrackTransition.
+                             Shared mode default — exclusive is opt-in.
+  config.go                  webConfig struct + load/save to %APPDATA%\gomusic\
+                             config-web.json. Separate file from Fyne's config.json
+                             so both UIs can coexist on the same machine.
+  library.go                 ScanLibrary (background + scan-progress events),
+                             GetLibraryAlbums, GetLibraryArtists, GetLibrarySongs
+                             (flat sorted list), LoadAlbum (replace playlist +
+                             play). Reads/writes the same library.gob as Fyne.
   dominant.go                Port of ui/dominant.go with no Fyne dependency —
-                             returns dominant color as CSS hex string "#rrggbb".
+                             returns dominant color as CSS hex string "#rrggbb",
+                             brightened toward white by 30% for dark-bg legibility.
   main.go                    Wails entry point: 1080×720, min 720×500,
-                             DragAndDrop{EnableFileDrop:true}.
-  wails.json                 name=Go Music, outputfilename=gomusic-web
+                             DragAndDrop{EnableFileDrop:true}, bg #0c0c0e.
+  wails.json                 name=Go Music, outputfilename=gomusic-web,
+                             info.productName for .exe properties.
+  build/appicon.png          Window icon (copy of ui/go_music_icon_1.png).
+  build/windows/icon.ico     Embedded into .exe by rsrc (copy of go_music_icon_1.ico).
   frontend/
-    src/App.svelte           Svelte 5 (runes). Two-column layout: sidebar 270px
-                             LEFT (Playlist|Albums|Artists tabs), player RIGHT.
-                             Canvas2D waveform, dynamic CSS accent from album art,
-                             depth-of-field lyrics, clickable progress bar,
-                             Shuffle/Repeat/Lyrics/Exclusive toggles.
+    src/App.svelte           Svelte 5 (runes). Layout: grid clamp() responsive —
+                             sidebar (Playlist|Songs|Albums|Artists) | player |
+                             optional lyrics panel. Player: art min(30vw,38vh,300px)
+                             with ambient glow, FFT spectrum visualizer with
+                             spring-physics bars + smooth waveform overlay
+                             (single rAF loop polls GetSpectrum+GetWaveform —
+                             display-sync'd, no IPC jitter), draggable progress
+                             bar (mousedown + window listeners — NOT pointer
+                             capture), accent CSS variables driving sidebar/
+                             player-bg/lyrics-panel tints, depth-of-field lyrics
+                             (inline scale/opacity/blur per line distance),
+                             retry-lyrics button on LRCLIB miss. Keyboard:
+                             Space/←→/Ctrl+←→/↑↓/S/R/L/Esc.
     wailsjs/go/main/         Auto-generated TS bindings — regenerated by wails
                              build every time. Do NOT hand-edit these.
   go.mod                     module webui; go 1.25.2; replace gomusic => ../
-  build/bin/gomusic-web.exe  Built output (~12 MB).
+  build/bin/gomusic-web.exe  Built output (~12.6 MB).
 ```
 
 ## When in doubt

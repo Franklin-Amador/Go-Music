@@ -404,32 +404,33 @@
   function filterByArtist(artist:string) { artistFilter=artist; tab='albums' }
   function clearArtistFilter() { artistFilter='' }
 
-  // Progress bar: click + drag to seek
-  let draggingProgress = false
+  // Progress bar — mousedown + window listeners (NOT setPointerCapture, which
+  // in WebView2 swallows subsequent click events and leaves the player feeling
+  // "stuck" until the user clicks elsewhere). Single source of truth: a
+  // mousedown opens a transient drag session; the same handler that fires the
+  // initial seek also wires mousemove + mouseup on window.
+  let draggingProgress = $state(false)
 
-  function onProgressPointerDown(e: PointerEvent) {
+  function onProgressMouseDown(e: MouseEvent) {
     if (!dur) return
+    const trackEl = e.currentTarget as HTMLElement
     draggingProgress = true
-    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
-    seekFromPointer(e)
+    seekFromMouse(e.clientX, trackEl)
+
+    const onMove = (ev: MouseEvent) => seekFromMouse(ev.clientX, trackEl)
+    const onUp   = () => {
+      draggingProgress = false
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup',   onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup',   onUp)
   }
-  function onProgressPointerMove(e: PointerEvent) {
-    if (!draggingProgress || !dur) return
-    seekFromPointer(e)
-  }
-  function onProgressPointerUp(e: PointerEvent) {
-    draggingProgress = false
-  }
-  function seekFromPointer(e: PointerEvent) {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
+
+  function seekFromMouse(clientX: number, el: HTMLElement) {
+    const r = el.getBoundingClientRect()
+    const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width))
     Backend.Seek(frac * dur)
-  }
-  // Keep click handler for non-pointer devices
-  function onProgressClick(e:MouseEvent) {
-    if (!dur || draggingProgress) return
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    Backend.Seek(((e.clientX - r.left) / r.width) * dur)
   }
 
   function onVolumeInput(e:Event) {
@@ -656,10 +657,7 @@
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="progress-track"
-           onclick={onProgressClick}
-           onpointerdown={onProgressPointerDown}
-           onpointermove={onProgressPointerMove}
-           onpointerup={onProgressPointerUp}
+           onmousedown={onProgressMouseDown}
            class:dragging={draggingProgress}>
         <div class="progress-fill" style="width:{progress}%">
           <div class="progress-thumb"></div>
