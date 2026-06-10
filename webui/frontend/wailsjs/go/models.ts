@@ -1,3 +1,24 @@
+export namespace audio {
+	
+	export class OutputDevice {
+	    id: string;
+	    name: string;
+	    isDefault: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new OutputDevice(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.isDefault = source["isDefault"];
+	    }
+	}
+
+}
+
 export namespace main {
 	
 	export class AlbumData {
@@ -20,6 +41,20 @@ export namespace main {
 	        this.artBase64 = source["artBase64"];
 	        this.accentHex = source["accentHex"];
 	        this.trackCount = source["trackCount"];
+	    }
+	}
+	export class PlaylistMeta {
+	    name: string;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new PlaylistMeta(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.count = source["count"];
 	    }
 	}
 	export class PlaylistTrack {
@@ -105,6 +140,9 @@ export namespace main {
 	    shuffle: boolean;
 	    repeat: boolean;
 	    musicRoot: string;
+	    visualizerMode: string;
+	    accentSource: string;
+	    outputDevice: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new webConfig(source);
@@ -120,6 +158,9 @@ export namespace main {
 	        this.shuffle = source["shuffle"];
 	        this.repeat = source["repeat"];
 	        this.musicRoot = source["musicRoot"];
+	        this.visualizerMode = source["visualizerMode"];
+	        this.accentSource = source["accentSource"];
+	        this.outputDevice = source["outputDevice"];
 	    }
 	}
 

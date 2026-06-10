@@ -12,6 +12,7 @@ package audio
 // The user never sees a difference in UX — quality degrades gracefully.
 
 import (
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,53 @@ import (
 
 	"github.com/gen2brain/malgo"
 )
+
+// OutputDevice is a WASAPI playback endpoint reported to the UI. ID is the
+// hex-encoded malgo device id (opaque token); pass it back to SetOutputDevice.
+type OutputDevice struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"isDefault"`
+}
+
+// ListPlaybackDevices enumerates the active playback endpoints (DACs, speakers,
+// HDMI…). Hot-plugged devices appear on the next call since malgo re-queries
+// the OS each time.
+func ListPlaybackDevices() ([]OutputDevice, error) {
+	mctx, err := ensureMalgoCtx()
+	if err != nil {
+		return nil, err
+	}
+	infos, err := mctx.Devices(malgo.Playback)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]OutputDevice, 0, len(infos))
+	for i := range infos {
+		d := &infos[i]
+		out = append(out, OutputDevice{
+			ID:        hex.EncodeToString(d.ID[:]),
+			Name:      d.Name(),
+			IsDefault: d.IsDefault != 0,
+		})
+	}
+	return out, nil
+}
+
+// parseDeviceID decodes a hex token from ListPlaybackDevices back into a
+// malgo.DeviceID. Returns (id, true) only on an exact-length match.
+func parseDeviceID(deviceHex string) (malgo.DeviceID, bool) {
+	var id malgo.DeviceID
+	if deviceHex == "" {
+		return id, false
+	}
+	raw, err := hex.DecodeString(deviceHex)
+	if err != nil || len(raw) != len(id) {
+		return id, false
+	}
+	copy(id[:], raw)
+	return id, true
+}
 
 // ── Singleton malgo context ──────────────────────────────────────────────────
 // malgo.InitContext scans audio backends (expensive). One context per process
@@ -59,9 +107,11 @@ type malgoPlayer struct {
 }
 
 // newExclusivePlayer opens a WASAPI exclusive device at 176 400 Hz / stereo /
-// float32. Returns an error if the DAC rejects the format or the device is
-// already held in exclusive mode by another application.
-func newExclusivePlayer(r io.Reader) (*malgoPlayer, error) {
+// float32. When deviceHex is a valid token from ListPlaybackDevices the device
+// is targeted explicitly; otherwise the system default playback device is used.
+// Returns an error if the DAC rejects the format or the device is already held
+// in exclusive mode by another application.
+func newExclusivePlayer(r io.Reader, deviceHex string) (*malgoPlayer, error) {
 	mctx, err := ensureMalgoCtx()
 	if err != nil {
 		return nil, err
@@ -78,6 +128,14 @@ func newExclusivePlayer(r io.Reader) (*malgoPlayer, error) {
 	cfg.Playback.Channels = uint32(outputChannels)
 	cfg.Playback.ShareMode = malgo.Exclusive
 	cfg.Wasapi.NoAutoConvertSRC = 1
+	// Target a specific endpoint when one was chosen in the UI. devID must
+	// outlive the InitDevice call below — keep it in the function scope (the
+	// unsafe.Pointer is GC-tracked, but a function-scoped var is unambiguous).
+	var devID malgo.DeviceID
+	if parsed, ok := parseDeviceID(deviceHex); ok {
+		devID = parsed
+		cfg.Playback.DeviceID = devID.Pointer()
+	}
 
 	device, err := malgo.InitDevice(mctx.Context, cfg, malgo.DeviceCallbacks{
 		Data: p.dataCallback,

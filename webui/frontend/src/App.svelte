@@ -1,252 +1,86 @@
 <script lang="ts">
   import { EventsOn } from '../wailsjs/runtime/runtime.js'
   import * as Backend from '../wailsjs/go/main/App.js'
+  import './lib/tokens.css'
+  import { s, d } from './lib/stores.svelte'
+  import type { TrackInfo, PlaylistTrack, PlaylistMeta, LyricLine, AlbumData } from './lib/stores.svelte'
+  import {
+    togglePlay, next, prev, toggleShuffle, toggleRepeat,
+    refreshLists, loadDevices, handlePositionChange,
+  } from './lib/player'
+  import { initViz, setVizData } from './lib/viz.svelte'
+  import Sidebar from './lib/Sidebar.svelte'
+  import Player from './lib/Player.svelte'
+  import LyricsPanel from './lib/LyricsPanel.svelte'
+  import NowPlaying from './lib/NowPlaying.svelte'
+  import SettingsModal from './lib/SettingsModal.svelte'
+  import AddToPlaylistModal from './lib/AddToPlaylistModal.svelte'
 
-  // ── types ───────────────────────────────────────────────────────────────────
-  interface TrackInfo {
-    path: string; title: string; artist: string; album: string
-    format: string; qualityLabel: string; dsdLabel: string
-    duration: number; isDSD: boolean; hasArt: boolean
-    artBase64: string; accentHex: string; outputMode: string
-  }
-  interface PlaylistTrack { index: number; path: string; title: string; current: boolean }
-  interface LyricLine    { timeSec: number; text: string }
-  interface AlbumData    { artist: string; title: string; year: number; artBase64: string; accentHex: string; trackCount: number }
-  interface SongData     { path: string; title: string; artist: string; album: string; trackNum: number }
-
-  // ── playback state ───────────────────────────────────────────────────────────
-  let track       = $state<TrackInfo | null>(null)
-  let playerState = $state('Stopped')
-  let pos         = $state(0)
-  let dur         = $state(0)
-  let volume      = $state(1.0)
-  let playlist    = $state<PlaylistTrack[]>([])
-  let lyrics       = $state<LyricLine[]>([])
-  let lyricsFetched = $state(false)  // true once the first fetch has returned (empty or not)
-  let lyricsRetrying = $state(false)
-  let waveform    = $state<number[]>([])
-  let errorMsg    = $state('')
-  let loading     = $state(false)
-  let showLyrics  = $state(false)
-  let isShuffle   = $state(false)
-  let isRepeat    = $state(false)
-  let isExclPref  = $state(false)  // shared by default — user opts into exclusive
-
-  // ── library state ────────────────────────────────────────────────────────────
-  let albums       = $state<AlbumData[]>([])
-  let artists      = $state<string[]>([])
-  let songs        = $state<SongData[]>([])
-  let songsLoaded  = $state(false)
-  let artistFilter = $state('')
-  let songSearch   = $state('')
-  let scanning     = $state(false)
-  let scanProgress = $state<{done:number;total:number}|null>(null)
-
-  // ── UI state ─────────────────────────────────────────────────────────────────
-  let tab      = $state<'playlist'|'albums'|'artists'|'songs'>('playlist')
-  let canvasEl = $state<HTMLCanvasElement|null>(null)
-
-  // ── derived ──────────────────────────────────────────────────────────────────
-  const isPlaying      = $derived(playerState === 'Playing')
-  const isPaused       = $derived(playerState === 'Paused')
-  const posStr         = $derived(fmtTime(pos))
-  const durStr         = $derived(fmtTime(dur))
-  const accentColor    = $derived(track?.accentHex || '#1db954')
-  const progress       = $derived(dur > 0 ? (pos / dur) * 100 : 0)
-  const filteredAlbums = $derived(artistFilter ? albums.filter(a => a.artist === artistFilter) : albums)
-  const filteredSongs  = $derived(
-    songSearch
-      ? songs.filter(s =>
-          s.title.toLowerCase().includes(songSearch.toLowerCase()) ||
-          s.artist.toLowerCase().includes(songSearch.toLowerCase()) ||
-          s.album.toLowerCase().includes(songSearch.toLowerCase()))
-      : songs
-  )
-  const activeLyricIdx = $derived((() => {
-    if (!lyrics.length) return -1
-    let idx = -1
-    for (let i = 0; i < lyrics.length; i++) {
-      if (lyrics[i].timeSec >= 0 && lyrics[i].timeSec <= pos) idx = i
-    }
-    return idx
-  })())
-
-  // ── CSS variable sync (rgba variants for glow effects) ───────────────────────
-  $effect(() => {
-    const hex = accentColor.replace('#','')
-    const r = parseInt(hex.slice(0,2),16)
-    const g = parseInt(hex.slice(2,4),16)
-    const b = parseInt(hex.slice(4,6),16)
-    const s = document.documentElement.style
-    s.setProperty('--accent',     accentColor)
-    s.setProperty('--accent-rgb', `${r},${g},${b}`)
-    s.setProperty('--accent-08',  `rgba(${r},${g},${b},0.08)`)
-    s.setProperty('--accent-15',  `rgba(${r},${g},${b},0.15)`)
-    s.setProperty('--accent-30',  `rgba(${r},${g},${b},0.30)`)
-    s.setProperty('--accent-50',  `rgba(${r},${g},${b},0.50)`)
-  })
-
-  // ── Visualizer: spring-physics spectrum bars + waveform overlay ─────────────
-  //
-  // Architecture:
-  //   rAF loop runs at display refresh rate (60 fps).
-  //   Every frame: step springs → draw. IPC poll for new data is non-blocking.
-  //   Springs decouple the draw rate from the IPC rate — smooth even if data
-  //   arrives at 30 fps. Spectrum (FFT) data reacts much faster than peak
-  //   envelope, making bars feel musically alive.
-
-  // Module-scope spring state (not $state — plain arrays, no Svelte tracking)
-  const N_BARS = 32
-  const N_WAVE = 48
-  const barPos  = new Float32Array(N_BARS).fill(0)
-  const barVel  = new Float32Array(N_BARS).fill(0)
-  const wavePos = new Float32Array(N_WAVE).fill(0)
-  const waveVel = new Float32Array(N_WAVE).fill(0)
-  let   latestSpectrum: number[] = []
-  let   latestWaveform: number[] = []
-  let   cachedRgb = '29,185,84'
-
-  // Keep cachedRgb in sync with accent (reactive → module-scope bridge)
-  $effect(() => {
-    const h = accentColor.replace('#','')
-    cachedRgb = `${parseInt(h.slice(0,2),16)},${parseInt(h.slice(2,4),16)},${parseInt(h.slice(4,6),16)}`
-  })
-
-  function stepSprings(pos: Float32Array, vel: Float32Array, src: number[], k: number, d: number) {
-    const n = pos.length
-    const sn = src.length
-    for (let i = 0; i < n; i++) {
-      const t = sn ? (src[Math.round(i * (sn-1) / (n-1))] ?? 0) : 0
-      vel[i] = vel[i] * d + (t - pos[i]) * k
-      pos[i] = Math.max(0, pos[i] + vel[i])
-    }
-  }
-
-  function drawFrame(ctx: CanvasRenderingContext2D, W: number, H: number) {
-    const cy = H / 2
-    const rgb = cachedRgb
-    ctx.clearRect(0, 0, W, H)
-
-    // ── Spectrum bars (symmetric up + down from center) ──────────────────────
-    const gap  = 1.5
-    const bW   = (W - gap * (N_BARS + 1)) / N_BARS
-
-    for (let i = 0; i < N_BARS; i++) {
-      const amp  = Math.min(1.15, barPos[i])
-      const edge = Math.min(1, Math.min(i, N_BARS-1-i) / (N_BARS * 0.1))
-      const h    = Math.max(1, amp * cy * 0.9 * edge)
-      const x    = gap + i * (bW + gap)
-      const r    = Math.min(bW / 2 - 0.5, 4)
-
-      const g = ctx.createLinearGradient(0, cy - h, 0, cy + h)
-      const a = (0.35 + amp * 0.65).toFixed(2)
-      const aD = (parseFloat(a) * 0.25).toFixed(2)
-      g.addColorStop(0,    `rgba(${rgb},${a})`)
-      g.addColorStop(0.35, `rgba(${rgb},${aD})`)
-      g.addColorStop(0.5,  `rgba(${rgb},0.02)`)
-      g.addColorStop(0.65, `rgba(${rgb},${aD})`)
-      g.addColorStop(1,    `rgba(${rgb},${a})`)
-
-      ctx.beginPath()
-      ctx.roundRect(x, cy - h, bW, h * 2, r)
-      ctx.fillStyle = g
-      ctx.fill()
-    }
-
-    // ── Waveform overlay (smooth Catmull-Rom through spring positions) ────────
-    if (latestWaveform.length) {
-      const step = W / (N_WAVE - 1)
-
-      const drawLine = (sign: number, alpha: string, width: number) => {
-        ctx.beginPath()
-        for (let i = 0; i < N_WAVE; i++) {
-          const edge = Math.min(1, Math.min(i, N_WAVE-1-i) / (N_WAVE * 0.07))
-          const y    = cy - wavePos[i] * cy * 0.72 * edge * sign
-          if (i === 0) {
-            ctx.moveTo(0, y)
-          } else {
-            // Midpoint quadratic — smooth B-spline through data points
-            const px = (i - 1) * step
-            const pe = Math.min(1, Math.min(i-1, N_WAVE-2-i) / (N_WAVE * 0.07))
-            const py = cy - wavePos[i-1] * cy * 0.72 * pe * sign
-            ctx.quadraticCurveTo(px, py, (px + i * step) / 2, (py + y) / 2)
-            ctx.lineTo(i * step, y)
-          }
-        }
-        ctx.strokeStyle = `rgba(${rgb},${alpha})`
-        ctx.lineWidth = width
-        ctx.lineJoin = 'round'
-        ctx.lineCap  = 'round'
-        ctx.stroke()
-      }
-
-      // Glow pass (both halves)
-      ctx.save(); ctx.filter = 'blur(3px)'
-      drawLine( 1, '0.35', 4)
-      drawLine(-1, '0.35', 4)
-      ctx.restore()
-
-      // Sharp pass
-      drawLine( 1, '0.85', 1.5)
-      drawLine(-1, '0.85', 1.5)
-    }
-  }
-
-  // Single rAF loop — steps springs every frame, polls IPC asynchronously
-  $effect(() => {
-    let rafId: number, running = true, pending = false
-
-    function loop() {
-      if (!running) return
-      rafId = requestAnimationFrame(loop)
-
-      stepSprings(barPos,  barVel,  latestSpectrum, 0.22, 0.60)
-      stepSprings(wavePos, waveVel, latestWaveform, 0.16, 0.68)
-
-      if (canvasEl) {
-        const ctx = canvasEl.getContext('2d')
-        if (ctx) drawFrame(ctx, canvasEl.width, canvasEl.height)
-      }
-
-      if (!pending) {
-        pending = true
-        Promise.all([Backend.GetSpectrum(), Backend.GetWaveform()])
-          .then(([spec, wave]) => {
-            latestSpectrum = spec  ?? []
-            latestWaveform = wave ?? []
-            pending = false
-          })
-          .catch(() => { pending = false })
-      }
-    }
-    rafId = requestAnimationFrame(loop)
-    return () => { running = false; cancelAnimationFrame(rafId) }
-  })
+  // Visualizer engine: rAF loop + accent palette tween (effects live for the
+  // app's lifetime).
+  initViz()
 
   // ── lyric auto-scroll ────────────────────────────────────────────────────────
+  // Scope the query to whichever lyric surface is on screen so the two copies
+  // (side panel + Now Playing) don't fight over scrollIntoView.
+  const activeLyricIdx = $derived(d.activeLyricIdx)
   $effect(() => {
-    if (activeLyricIdx < 0 || !showLyrics) return
-    document.querySelector('.lyric-active')?.scrollIntoView({behavior:'smooth',block:'center'})
+    if (activeLyricIdx < 0) return
+    const scope = s.showNowPlaying ? '.np-lyrics' : (s.showLyrics ? '.lyrics-list' : null)
+    if (!scope) return
+    document.querySelector(`${scope} .lyric-active`)?.scrollIntoView({behavior:'smooth',block:'center'})
   })
 
   // ── lazy load songs when tab opens ──────────────────────────────────────────
   $effect(() => {
-    if (tab === 'songs' && !songsLoaded) {
-      songsLoaded = true
-      Backend.GetLibrarySongs().then(s => { songs = s ?? [] })
+    if (s.tab === 'songs' && !s.songsLoaded) {
+      s.songsLoaded = true
+      Backend.GetLibrarySongs().then(sg => { s.songs = sg ?? [] })
     }
+  })
+
+  // ── reload output devices each time Settings opens (catches hot-plug) ────────
+  $effect(() => {
+    if (s.showSettings) loadDevices()
+  })
+
+  // ── immersive: keep "Up next" fresh ──────────────────────────────────────────
+  // Re-query whenever the track or queue changes (covers shuffle order too,
+  // since PeekNext lives in Go). Touch the deps so the effect tracks them.
+  $effect(() => {
+    void s.track; void s.playlist; void s.isShuffle
+    Backend.UpNext().then(t => { s.upNext = t }).catch(() => { s.upNext = null })
+  })
+
+  // ── immersive: auto-hide controls after 3s of mouse inactivity ───────────────
+  $effect(() => {
+    if (!s.showNowPlaying) { s.npIdle = false; return }
+    let timer: number
+    const reset = () => {
+      s.npIdle = false
+      clearTimeout(timer)
+      timer = setTimeout(() => { s.npIdle = true }, 3000) as unknown as number
+    }
+    reset()
+    window.addEventListener('mousemove', reset)
+    return () => { window.removeEventListener('mousemove', reset); clearTimeout(timer) }
   })
 
   // ── Restore persisted state on startup ───────────────────────────────────────
   $effect(() => {
     Backend.GetInitialState().then(cfg => {
       if (!cfg) return
-      volume     = cfg.volume    ?? 1.0
-      isExclPref = cfg.exclusive ?? false
-      isShuffle  = cfg.shuffle   ?? false
-      isRepeat   = cfg.repeat    ?? false
+      s.volume         = cfg.volume    ?? 1.0
+      s.isExclPref     = cfg.exclusive ?? false
+      s.isShuffle      = cfg.shuffle   ?? false
+      s.isRepeat       = cfg.repeat    ?? false
+      s.crossfade      = cfg.crossfade ?? 0
+      s.visualizerMode = (cfg.visualizerMode as 'bars'|'wave'|'radial') || 'bars'
+      s.accentSource   = (cfg.accentSource as 'auto'|'fixed') || 'auto'
+      s.selectedDevice = cfg.outputDevice ?? ''
       // Engine already applied these in startup(); just sync the UI toggles.
     })
+    refreshLists()
   })
 
   // ── Save on window close (pagehide fires before WebView tears down) ──────────
@@ -269,26 +103,31 @@
           break
         case 'ArrowRight':
           if (e.ctrlKey) { e.preventDefault(); next() }
-          else           { e.preventDefault(); Backend.Seek(Math.min(pos + 5, dur)) }
+          else           { e.preventDefault(); Backend.Seek(Math.min(s.pos + 5, s.dur)) }
           break
         case 'ArrowLeft':
           if (e.ctrlKey) { e.preventDefault(); prev() }
-          else           { e.preventDefault(); Backend.Seek(Math.max(pos - 5, 0)) }
+          else           { e.preventDefault(); Backend.Seek(Math.max(s.pos - 5, 0)) }
           break
         case 'ArrowUp':
           e.preventDefault()
-          volume = Math.min(1, volume + 0.05)
-          Backend.SetVolume(volume)
+          s.volume = Math.min(1, s.volume + 0.05)
+          Backend.SetVolume(s.volume)
           break
         case 'ArrowDown':
           e.preventDefault()
-          volume = Math.max(0, volume - 0.05)
-          Backend.SetVolume(volume)
+          s.volume = Math.max(0, s.volume - 0.05)
+          Backend.SetVolume(s.volume)
           break
         case 'KeyS': toggleShuffle(); break
         case 'KeyR': toggleRepeat();  break
-        case 'KeyL': showLyrics = !showLyrics; break
-        case 'Escape': songSearch = ''; artistFilter = ''; break
+        case 'KeyL': s.showLyrics = !s.showLyrics; break
+        case 'Escape':
+          if (s.addMenuPath !== null) { s.addMenuPath = null }
+          else if (s.showSettings)    { s.showSettings = false }
+          else if (s.showNowPlaying)  { s.showNowPlaying = false }
+          else                        { s.songSearch = ''; s.artistFilter = '' }
+          break
       }
     }
     window.addEventListener('keydown', onKey)
@@ -298,520 +137,61 @@
   // ── Wails events ─────────────────────────────────────────────────────────────
   $effect(() => {
     const off = [
-      EventsOn('state-change', (s:string) => {
-        playerState = s
-        if (s === 'Stopped') { pos = 0; loading = false }
-        if (s === 'Loading')  loading = true
-        if (s === 'Playing')  loading = false
+      EventsOn('state-change', (st:string) => {
+        s.playerState = st
+        if (st === 'Stopped') { s.pos = 0; s.loading = false; s.seekPreview = null }
+        if (st === 'Loading')  s.loading = true
+        if (st === 'Playing')  s.loading = false
       }),
-      EventsOn('position-change', (p:{pos:number;dur:number}) => { pos=p.pos; dur=p.dur }),
+      EventsOn('position-change', handlePositionChange),
+      // Visualizer push (~30 fps from Go, only while playing) — replaces the
+      // old per-frame GetSpectrum/GetWaveform IPC polling.
+      EventsOn('viz-data', setVizData),
       EventsOn('track-change',    (info:TrackInfo) => {
-        track=info; loading=false; errorMsg=''
-        lyrics=[]; lyricsFetched=false; lyricsRetrying=false
+        s.track=info; s.loading=false; s.errorMsg=''
+        s.seekPreview = null
+        s.lyrics=[]; s.lyricsFetched=false; s.lyricsRetrying=false
       }),
-      EventsOn('playlist-updated',(pl:PlaylistTrack[]) => { playlist=pl }),
+      EventsOn('playlist-updated',(pl:PlaylistTrack[]) => { s.playlist=pl }),
+      EventsOn('playlists-updated',(p:PlaylistMeta[]) => {
+        s.playlists = p ?? []
+        if (s.openListName) Backend.GetPlaylistTracks(s.openListName).then(t => { s.openListTracks = t ?? [] })
+      }),
       EventsOn('lyrics', (lines:LyricLine[]|null) => {
-        lyrics = lines ?? []
-        lyricsFetched = true
-        lyricsRetrying = false
+        s.lyrics = lines ?? []
+        s.lyricsFetched = true
+        s.lyricsRetrying = false
       }),
-      EventsOn('audio-error',     (msg:string) => { errorMsg=msg; loading=false; scanning=false }),
-      EventsOn('playback-finished',() => { playerState='Stopped'; pos=0 }),
+      EventsOn('audio-error',     (msg:string) => { s.errorMsg=msg; s.loading=false; s.scanning=false }),
+      EventsOn('playback-finished',() => { s.playerState='Stopped'; s.pos=0 }),
       EventsOn('library-updated', (data:{albums:AlbumData[];artists:string[]}) => {
-        albums=data.albums ?? []
-        artists=data.artists ?? []
+        s.albums=data.albums ?? []
+        s.artists=data.artists ?? []
         // Reload songs if tab already visited
-        if (songsLoaded) Backend.GetLibrarySongs().then(s => { songs = s ?? [] })
+        if (s.songsLoaded) Backend.GetLibrarySongs().then(sg => { s.songs = sg ?? [] })
       }),
-      EventsOn('scan-progress', (p:{done:number;total:number}) => { scanProgress=p }),
-      EventsOn('scan-done',     () => { scanning=false; scanProgress=null }),
+      EventsOn('scan-progress', (p:{done:number;total:number}) => { s.scanProgress=p }),
+      EventsOn('scan-done',     () => { s.scanning=false; s.scanProgress=null }),
       EventsOn('wails:file-drop', (paths:string[]) => {
-        Backend.AddFiles(paths).then(pl => { playlist=pl })
+        Backend.AddFiles(paths).then(pl => { s.playlist=pl })
       }),
     ]
     return () => off.forEach(f => f())
   })
-
-  // ── handlers ─────────────────────────────────────────────────────────────────
-  async function openFile() {
-    const path = await Backend.OpenFileDialog()
-    if (!path) return
-    errorMsg=''; loading=true
-    try { track = await Backend.LoadFile(path) }
-    catch(e:any) { errorMsg=String(e); loading=false }
-  }
-
-  async function openFolder() {
-    const dir = await Backend.OpenFolderDialog()
-    if (!dir) return
-    const pl = await Backend.AddFolder(dir)
-    playlist = pl
-    tab = 'playlist'
-  }
-
-  async function scanLibraryDialog() {
-    const dir = await Backend.OpenFolderDialog()
-    if (!dir) return
-    scanning=true; scanProgress={done:0,total:0}
-    Backend.ScanLibrary(dir)
-  }
-
-  async function play()  { try { await Backend.Play() } catch(e:any) { errorMsg=String(e) } }
-  function pause() { Backend.Pause() }
-  function stop()  { Backend.Stop() }
-
-  // Single handler — re-evaluates state at click time, not at render time.
-  function togglePlay() {
-    if (isPlaying) pause()
-    else play()
-  }
-
-  async function next() {
-    loading=true
-    try { const t=await Backend.Next(); if(t) track=t }
-    catch(e:any) { errorMsg=String(e) }
-    finally { loading=false }
-  }
-
-  async function prev() {
-    loading=true
-    try { const t=await Backend.Prev(); if(t) track=t }
-    catch(e:any) { errorMsg=String(e) }
-    finally { loading=false }
-  }
-
-  async function playAt(index:number) {
-    loading=true
-    try { const t=await Backend.PlayAt(index); if(t) track=t }
-    catch(e:any) { errorMsg=String(e) }
-    finally { loading=false }
-  }
-
-  async function loadAlbum(artist:string, title:string) {
-    loading=true; tab='playlist'
-    try { const t=await Backend.LoadAlbum(artist, title); if(t) track=t }
-    catch(e:any) { errorMsg=String(e) }
-    finally { loading=false }
-  }
-
-  async function playSong(path:string) {
-    loading=true; tab='playlist'
-    try { const t=await Backend.PlaySong(path); if(t) track=t }
-    catch(e:any) { errorMsg=String(e) }
-    finally { loading=false }
-  }
-
-  function filterByArtist(artist:string) { artistFilter=artist; tab='albums' }
-  function clearArtistFilter() { artistFilter='' }
-
-  // Progress bar — mousedown + window listeners (NOT setPointerCapture, which
-  // in WebView2 swallows subsequent click events and leaves the player feeling
-  // "stuck" until the user clicks elsewhere). Single source of truth: a
-  // mousedown opens a transient drag session; the same handler that fires the
-  // initial seek also wires mousemove + mouseup on window.
-  let draggingProgress = $state(false)
-
-  function onProgressMouseDown(e: MouseEvent) {
-    if (!dur) return
-    const trackEl = e.currentTarget as HTMLElement
-    draggingProgress = true
-    seekFromMouse(e.clientX, trackEl)
-
-    const onMove = (ev: MouseEvent) => seekFromMouse(ev.clientX, trackEl)
-    const onUp   = () => {
-      draggingProgress = false
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup',   onUp)
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup',   onUp)
-  }
-
-  function seekFromMouse(clientX: number, el: HTMLElement) {
-    const r = el.getBoundingClientRect()
-    const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width))
-    Backend.Seek(frac * dur)
-  }
-
-  function onVolumeInput(e:Event) {
-    volume = parseFloat((e.target as HTMLInputElement).value)
-    Backend.SetVolume(volume)
-  }
-
-  function retryLyrics() {
-    if (!track) return
-    lyricsRetrying = true
-    Backend.RetryLyrics()
-  }
-
-  function toggleShuffle()  { isShuffle=!isShuffle; Backend.SetShuffle(isShuffle) }
-  function toggleRepeat()   { isRepeat=!isRepeat;   Backend.SetRepeat(isRepeat) }
-  function toggleExclusive(){ isExclPref=!isExclPref; Backend.SetExclusive(isExclPref) }
-
-  function fmtTime(s:number) {
-    if (!s||s<0) return '0:00'
-    return `${Math.floor(s/60)}:${Math.floor(s%60).toString().padStart(2,'0')}`
-  }
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════ -->
 
-<div class="layout" class:lyrics-open={showLyrics}>
-
-  <!-- ════ LEFT SIDEBAR ════════════════════════════════════════════════════ -->
-  <aside class="sidebar">
-
-    <div class="tabs">
-      <button class="tab" class:active={tab==='playlist'} onclick={() => tab='playlist'}>Queue</button>
-      <button class="tab" class:active={tab==='songs'}    onclick={() => tab='songs'}>Songs</button>
-      <button class="tab" class:active={tab==='albums'}   onclick={() => tab='albums'}>Albums</button>
-      <button class="tab" class:active={tab==='artists'}  onclick={() => tab='artists'}>Artists</button>
-    </div>
-
-    <div class="tab-content">
-
-      <!-- QUEUE -->
-      {#if tab === 'playlist'}
-        {#if playlist.length === 0}
-          <div class="empty-state">
-            <span class="empty-icon">♫</span>
-            <p>Open a file or folder to start</p>
-          </div>
-        {:else}
-          <ul class="pl-list">
-            {#each playlist as t}
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-              <li class="pl-item" class:pl-current={t.current} onclick={() => playAt(t.index)}>
-                <span class="pl-num">{t.current ? '▶' : t.index+1}</span>
-                <span class="pl-title">{t.title}</span>
-                <span class="pl-remove"
-                      onclick={(e) => { e.stopPropagation(); Backend.Remove(t.index) }}
-                      title="Remove">✕</span>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-
-      <!-- SONGS -->
-      {:else if tab === 'songs'}
-        <div class="search-wrap">
-          <input class="search-input" type="text" placeholder="Search songs…"
-                 bind:value={songSearch} />
-        </div>
-        {#if songs.length === 0}
-          <div class="empty-state">
-            <span class="empty-icon">♪</span>
-            <p>{songsLoaded ? 'Scan library to populate' : 'Loading…'}</p>
-          </div>
-        {:else}
-          <p class="list-count">{filteredSongs.length} of {songs.length} songs</p>
-          <ul class="song-list">
-            {#each filteredSongs as s}
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-              <li class="song-item" onclick={() => playSong(s.path)}>
-                <div class="song-main">
-                  <span class="song-title">{s.title}</span>
-                  <span class="song-sub">{s.artist}{s.album ? ' · ' + s.album : ''}</span>
-                </div>
-                <span class="song-play-icon">▶</span>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-
-      <!-- ALBUMS -->
-      {:else if tab === 'albums'}
-        {#if artistFilter}
-          <div class="filter-bar">
-            <span class="filter-lbl">{artistFilter}</span>
-            <button class="filter-clear" onclick={clearArtistFilter}>✕</button>
-          </div>
-        {/if}
-        {#if filteredAlbums.length === 0}
-          <div class="empty-state">
-            <span class="empty-icon">◎</span>
-            <p>{albums.length === 0 ? 'Scan library first' : 'No albums for this artist'}</p>
-          </div>
-        {:else}
-          <div class="album-grid">
-            {#each filteredAlbums as al}
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div class="album-card" onclick={() => loadAlbum(al.artist, al.title)}
-                   style={al.accentHex ? `--card-accent:${al.accentHex}` : ''}>
-                {#if al.artBase64}
-                  <img class="album-art" src={al.artBase64} alt={al.title} />
-                {:else}
-                  <div class="album-placeholder">♪</div>
-                {/if}
-                <div class="album-meta">
-                  <p class="album-title">{al.title}</p>
-                  <p class="album-artist">{al.artist}</p>
-                </div>
-              </div>
-            {/each}
-          </div>
-        {/if}
-
-      <!-- ARTISTS -->
-      {:else}
-        {#if artists.length === 0}
-          <div class="empty-state">
-            <span class="empty-icon">♫</span>
-            <p>Scan library first</p>
-          </div>
-        {:else}
-          <p class="list-count">{artists.length} artists</p>
-          <ul class="artist-list">
-            {#each artists as artist}
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-              <li class="artist-item" class:artist-active={artist===artistFilter}
-                  onclick={() => filterByArtist(artist)}>
-                <span class="artist-name">{artist}</span>
-                <span class="artist-arrow">›</span>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      {/if}
-
-    </div><!-- /tab-content -->
-
-    <!-- scan progress -->
-    {#if scanning}
-      <div class="scan-bar-wrap">
-        <span class="scan-label">Scanning…{scanProgress ? ` ${scanProgress.done}/${scanProgress.total}` : ''}</span>
-        {#if scanProgress && scanProgress.total > 0}
-          <div class="scan-track">
-            <div class="scan-fill" style="width:{(scanProgress.done/scanProgress.total)*100}%"></div>
-          </div>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- footer -->
-    <div class="sidebar-footer">
-      <button class="foot-btn" onclick={openFile}   title="Open audio file">+ File</button>
-      <button class="foot-btn" onclick={openFolder} title="Add folder to queue">+ Folder</button>
-      <button class="foot-btn accent" onclick={scanLibraryDialog} title="Scan music library">⟳ Library</button>
-      {#if playlist.length > 0}
-        <button class="foot-btn danger" onclick={() => Backend.ClearPlaylist()}>✕</button>
-      {/if}
-    </div>
-  </aside>
-
-  <!-- ════ RIGHT PLAYER ════════════════════════════════════════════════════ -->
-  <main class="player">
-
-    <!-- ambient gradient bg driven by accent -->
-    <div class="player-bg" aria-hidden="true"></div>
-
-    <!-- album art -->
-    <div class="art-section">
-      {#if track?.artBase64}
-        <div class="art-wrap">
-          <img class="art-glow" src={track.artBase64} alt="" aria-hidden="true" />
-          <img class="art-img"  src={track.artBase64} alt="Album art" />
-        </div>
-      {:else}
-        <div class="art-wrap art-empty">
-          <span class="art-glyph">♫</span>
-        </div>
-      {/if}
-    </div>
-
-    <!-- track info -->
-    <div class="track-info">
-      {#if loading}
-        <div class="loading-dots"><span></span><span></span><span></span></div>
-      {:else if track}
-        <h1 class="track-title">{track.title}</h1>
-        <p class="track-sub">
-          {#if track.artist}<span class="track-artist">{track.artist}</span>{/if}
-          {#if track.artist && track.album}<span class="dot">·</span>{/if}
-          {#if track.album}<span class="track-album">{track.album}</span>{/if}
-        </p>
-        <div class="badges">
-          <span class="badge">{track.qualityLabel || track.format}</span>
-          {#if track.isDSD}<span class="badge badge-dsd">{track.dsdLabel}</span>{/if}
-          {#if track.outputMode}
-            <span class="badge" class:badge-excl={track.outputMode==='exclusive'}>
-              {track.outputMode === 'exclusive' ? '● EXCLUSIVE' : '○ SHARED'}
-            </span>
-          {/if}
-        </div>
-      {:else}
-        <p class="track-empty">Drop files here or use the sidebar</p>
-      {/if}
-    </div>
-
-    <!-- waveform -->
-    <canvas bind:this={canvasEl} class="waveform" width="640" height="72"></canvas>
-
-    <!-- progress -->
-    <div class="progress-section">
-      <span class="time">{posStr}</span>
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="progress-track"
-           onmousedown={onProgressMouseDown}
-           class:dragging={draggingProgress}>
-        <div class="progress-fill" style="width:{progress}%">
-          <div class="progress-thumb"></div>
-        </div>
-      </div>
-      <span class="time">{durStr}</span>
-    </div>
-
-    <!-- transport -->
-    <div class="transport">
-      <button class="ctrl-btn" onclick={prev} title="Previous" disabled={!playlist.length}>
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
-      </button>
-      <button class="play-btn" onclick={togglePlay}
-              title={isPlaying ? 'Pause' : 'Play'}
-              disabled={!track && !playlist.length}>
-        {#if isPlaying}
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-        {:else}
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-        {/if}
-      </button>
-      <button class="ctrl-btn" onclick={next} title="Next" disabled={!playlist.length}>
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zm2-8.14L11.03 12 8 14.14V9.86zM16 6h2v12h-2z"/></svg>
-      </button>
-      <button class="ctrl-btn" onclick={stop} title="Stop"
-              disabled={!isPlaying && !isPaused}>
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h12v12H6z"/></svg>
-      </button>
-    </div>
-
-    <!-- toggles -->
-    <div class="toggles">
-      <button class="tog" class:tog-on={isShuffle}  onclick={toggleShuffle}>
-        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17zm4.76-.99l3.65 3.65-3.65 3.65V13h-1.76l-6.4-6.4 1.41-1.41 5.75 5.75V9.18zm.59 10.41v-2.59l-10-10H4V4h1.41l10 10H18V11.41l3.5 3.5z"/></svg>
-        Shuffle
-      </button>
-      <button class="tog" class:tog-on={isRepeat} onclick={toggleRepeat}>
-        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M7 7h10v3l4-4-4-4v3H5v6h2zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2z"/></svg>
-        Repeat
-      </button>
-      <button class="tog" class:tog-on={showLyrics} onclick={() => showLyrics=!showLyrics}>
-        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3z"/></svg>
-        Lyrics
-      </button>
-      <button class="tog excl-tog" class:tog-on={isExclPref} onclick={toggleExclusive}>
-        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
-        {isExclPref ? 'Exclusive' : 'Shared'}
-      </button>
-    </div>
-
-    <!-- volume -->
-    <div class="volume-row">
-      <svg class="vol-icon" viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-        {#if volume === 0}
-          <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
-        {:else if volume < 0.5}
-          <path d="M18.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM5 9v6h4l5 5V4L9 9H5z"/>
-        {:else}
-          <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
-        {/if}
-      </svg>
-      <input type="range" min="0" max="1" step="0.01" value={volume}
-             oninput={onVolumeInput} class="vol-slider"
-             style="--vol:{volume}" />
-      <span class="vol-pct">{Math.round(volume*100)}%</span>
-    </div>
-
-    {#if errorMsg}
-      <div class="error-bar">{errorMsg} <button onclick={() => errorMsg=''}>✕</button></div>
-    {/if}
-
-  </main>
-
-  <!-- ════ RIGHT LYRICS PANEL ══════════════════════════════════════════ -->
-  {#if showLyrics}
-    <aside class="lyrics-panel">
-      <div class="lyrics-header">
-        <span>Lyrics</span>
-        <button class="lyrics-close" onclick={() => showLyrics=false}>✕</button>
-      </div>
-
-      {#if lyrics.length > 0}
-        <div class="lyrics-list">
-          {#each lyrics as line, i}
-            {@const dist = activeLyricIdx >= 0 ? Math.abs(i - activeLyricIdx) : 8}
-            {@const sizes   = ['1.10rem','0.90rem','0.78rem','0.70rem','0.65rem']}
-            {@const opas    = [1, 0.70, 0.42, 0.22, 0.12]}
-            {@const scales  = [1.04, 0.97, 0.93, 0.90, 0.87]}
-            {@const blurs   = [0, 0.6, 1.4, 2.4, 3.2]}
-            {@const d       = Math.min(dist, 4)}
-            <p class="lyric"
-               class:lyric-active={dist === 0}
-               style="font-size:{sizes[d]};opacity:{opas[d]};transform:scale({scales[d]});filter:blur({blurs[d]}px);">
-              {line.text || '·'}
-            </p>
-          {/each}
-        </div>
-      {:else if !track}
-        <div class="lyrics-empty">
-          <span class="lyrics-glyph">♪</span>
-          <p>No track loaded</p>
-        </div>
-      {:else if !lyricsFetched || lyricsRetrying}
-        <div class="lyrics-empty">
-          <div class="loading-dots"><span></span><span></span><span></span></div>
-          <p>{lyricsRetrying ? 'Retrying…' : 'Searching for lyrics…'}</p>
-        </div>
-      {:else}
-        <div class="lyrics-empty">
-          <span class="lyrics-glyph">♪</span>
-          <p class="lyrics-empty-title">No lyrics found</p>
-          <p class="lyrics-empty-sub">LRCLIB had no match, or you were offline.</p>
-          <button class="retry-btn" onclick={retryLyrics}>
-            <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
-              <path d="M17.65 6.35A7.958 7.958 0 0012 4a8 8 0 100 16c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
-            </svg>
-            Retry lookup
-          </button>
-        </div>
-      {/if}
-    </aside>
-  {/if}
-
+<div class="layout" class:lyrics-open={s.showLyrics}>
+  <Sidebar />
+  <Player />
+  <LyricsPanel />
+  <NowPlaying />
+  <SettingsModal />
+  <AddToPlaylistModal />
 </div>
 
 <style>
-  /* ── design tokens ──────────────────────────────────────────────────── */
-  :root {
-    --accent:     #1db954;
-    --accent-rgb: 29,185,84;
-    --accent-08:  rgba(29,185,84,0.08);
-    --accent-15:  rgba(29,185,84,0.15);
-    --accent-30:  rgba(29,185,84,0.30);
-    --accent-50:  rgba(29,185,84,0.50);
-
-    --bg:      #0a0a0c;
-    --sf1:     #111115;
-    --sf2:     #16161b;
-    --sf3:     #1e1e25;
-    --border:  #202028;
-    --text:    #ebebf0;
-    --muted:   #52525f;
-    --muted2:  #3a3a45;
-    --dsd:     #f5a623;
-    --r:       8px;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0 }
-
-  /* SVG icons inside buttons MUST NOT intercept pointer events.
-     Otherwise the click target is the <path> and the button's onclick
-     never fires — that was the cause of the play button not pausing. */
-  button svg, button svg * { pointer-events: none }
-
   /* ── root layout — proporciones fluidas ─────────────────────────────── */
   .layout {
     display: grid;
@@ -831,436 +211,4 @@
   .layout.lyrics-open {
     grid-template-columns: clamp(200px, 23vw, 300px) 1fr clamp(200px, 22vw, 310px);
   }
-
-  /* ════════════════ SIDEBAR ═════════════════════════════════════════ */
-  .sidebar {
-    display: flex; flex-direction: column;
-    background: linear-gradient(
-      175deg,
-      rgba(var(--accent-rgb), 0.05) 0%,
-      var(--sf1) 18%
-    );
-    border-right: 1px solid var(--border);
-    overflow: hidden;
-    transition: background 0.6s ease;
-  }
-
-  /* tabs */
-  .tabs {
-    display: grid; grid-template-columns: repeat(4, 1fr);
-    border-bottom: 1px solid var(--border); flex-shrink: 0
-  }
-  .tab {
-    background: none; border: none; color: var(--muted);
-    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.06em;
-    text-transform: uppercase; padding: 0.65rem 0; cursor: pointer;
-    border-bottom: 2px solid transparent; margin-bottom: -1px;
-    transition: color .15s
-  }
-  .tab:hover  { color: var(--text) }
-  .tab.active { color: var(--accent); border-bottom-color: var(--accent) }
-
-  /* content area */
-  .tab-content { flex: 1; overflow-y: auto; overflow-x: hidden }
-
-  /* empty state */
-  .empty-state {
-    display: flex; flex-direction: column; align-items: center;
-    padding: 3rem 1rem; gap: 0.5rem; color: var(--muted)
-  }
-  .empty-icon { font-size: 2rem; opacity: 0.3 }
-  .empty-state p { font-size: 0.78rem; text-align: center }
-
-  /* count label */
-  .list-count { font-size: 0.65rem; color: var(--muted); padding: 0.5rem 0.75rem }
-
-  /* queue/playlist */
-  .pl-list { list-style: none }
-  .pl-item {
-    display: grid; grid-template-columns: 1.8rem 1fr 1.2rem;
-    align-items: center; gap: 0.25rem;
-    padding: 0.42rem 0.6rem; cursor: pointer;
-    transition: background .1s; border-left: 2px solid transparent
-  }
-  .pl-item:hover          { background: var(--sf2) }
-  .pl-item.pl-current     { background: var(--accent-08); border-left-color: var(--accent) }
-  .pl-num  { font-size: 0.62rem; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums }
-  .pl-current .pl-num   { color: var(--accent); font-weight: 700 }
-  .pl-title { font-size: 0.77rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-  .pl-current .pl-title { color: var(--accent) }
-  .pl-remove { font-size: 0.58rem; color: transparent; cursor: pointer; text-align: center; transition: color .1s }
-  .pl-item:hover .pl-remove { color: var(--muted2) }
-  .pl-remove:hover          { color: #f08080 !important }
-
-  /* songs */
-  .search-wrap { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border) }
-  .search-input {
-    width: 100%; background: var(--sf2); border: 1px solid var(--border);
-    color: var(--text); font-size: 0.76rem; padding: 0.35rem 0.6rem;
-    border-radius: 6px; outline: none; transition: border-color .15s
-  }
-  .search-input:focus { border-color: var(--accent) }
-  .search-input::placeholder { color: var(--muted) }
-
-  .song-list { list-style: none }
-  .song-item {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 0.45rem 0.7rem; cursor: pointer; border-left: 2px solid transparent;
-    transition: background .1s
-  }
-  .song-item:hover { background: var(--sf2); border-left-color: var(--accent) }
-  .song-main  { flex: 1; min-width: 0 }
-  .song-title { display: block; font-size: 0.78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-  .song-sub   { display: block; font-size: 0.66rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px }
-  .song-play-icon { font-size: 0.6rem; color: transparent; margin-left: 0.4rem; transition: color .1s; flex-shrink: 0 }
-  .song-item:hover .song-play-icon { color: var(--accent) }
-
-  /* albums */
-  .filter-bar {
-    display: flex; align-items: center; gap: 0.5rem;
-    padding: 0.45rem 0.6rem; background: var(--accent-08);
-    border-bottom: 1px solid var(--border)
-  }
-  .filter-lbl   { flex: 1; font-size: 0.72rem; color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-  .filter-clear { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.7rem; padding: 2px 4px }
-  .filter-clear:hover { color: #f08080 }
-
-  .album-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; padding: 6px }
-  .album-card {
-    background: var(--sf2); border-radius: var(--r); overflow: hidden;
-    cursor: pointer; transition: transform .18s, box-shadow .18s;
-    border: 1px solid var(--border)
-  }
-  .album-card:hover {
-    transform: translateY(-3px) scale(1.02);
-    box-shadow: 0 8px 24px #00000070, 0 0 0 1px var(--card-accent, var(--accent))44
-  }
-  .album-art, .album-placeholder {
-    width: 100%; aspect-ratio: 1; display: block; object-fit: cover
-  }
-  .album-placeholder {
-    display: flex; align-items: center; justify-content: center;
-    background: var(--sf3); color: var(--muted2); font-size: 1.6rem
-  }
-  .album-meta   { padding: 0.3rem 0.4rem 0.4rem }
-  .album-title  { font-size: 0.68rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-  .album-artist { font-size: 0.62rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px }
-
-  /* artists */
-  .artist-list { list-style: none }
-  .artist-item {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 0.52rem 0.75rem; cursor: pointer; border-left: 2px solid transparent;
-    transition: background .1s; border-bottom: 1px solid var(--border)
-  }
-  .artist-item:hover       { background: var(--sf2) }
-  .artist-item.artist-active { background: var(--accent-08); border-left-color: var(--accent) }
-  .artist-name  { font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-  .artist-arrow { font-size: 1rem; color: var(--muted2) }
-  .artist-item:hover .artist-arrow { color: var(--accent) }
-
-  /* scan progress */
-  .scan-bar-wrap {
-    padding: 0.4rem 0.6rem; border-top: 1px solid var(--border);
-    display: flex; flex-direction: column; gap: 0.25rem; flex-shrink: 0
-  }
-  .scan-label { font-size: 0.66rem; color: var(--muted) }
-  .scan-track { height: 2px; background: var(--border); border-radius: 1px; overflow: hidden }
-  .scan-fill  { height: 100%; background: var(--accent); border-radius: 1px; transition: width .3s }
-
-  /* footer */
-  .sidebar-footer {
-    flex-shrink: 0; display: flex; gap: 3px;
-    padding: 5px 6px; border-top: 1px solid var(--border)
-  }
-  .foot-btn {
-    flex: 1; background: var(--sf2); border: 1px solid var(--border);
-    color: var(--muted); font-size: 0.66rem; font-weight: 600;
-    padding: 0.38rem 0; border-radius: 6px; cursor: pointer;
-    transition: background .12s, color .12s
-  }
-  .foot-btn:hover        { background: var(--sf3); color: var(--text) }
-  .foot-btn.accent       { color: var(--accent); border-color: var(--accent-30) }
-  .foot-btn.accent:hover { background: var(--accent-15) }
-  .foot-btn.danger       { color: #f08080; border-color: #7a202045 }
-  .foot-btn.danger:hover { background: #3a1010 }
-
-  /* ════════════════ PLAYER ══════════════════════════════════════════ */
-  .player {
-    position: relative;
-    display: flex; flex-direction: column; align-items: center;
-    gap: 0.7rem; padding: 1.6rem 2.4rem 1.2rem;
-    overflow-y: auto;
-  }
-
-  /* ambient gradient — mucho más intenso, cubre más área */
-  .player-bg {
-    position: absolute; inset: 0; pointer-events: none; z-index: 0;
-    transition: opacity 0.8s ease;
-    background:
-      radial-gradient(ellipse 110% 65% at 50% -8%,
-        rgba(var(--accent-rgb), 0.28) 0%, transparent 60%),
-      radial-gradient(ellipse 70% 50% at 10% 90%,
-        rgba(var(--accent-rgb), 0.15) 0%, transparent 55%),
-      radial-gradient(ellipse 60% 45% at 90% 85%,
-        rgba(var(--accent-rgb), 0.10) 0%, transparent 50%),
-      var(--bg)
-  }
-
-  /* everything above the bg */
-  .player > *:not(.player-bg) { position: relative; z-index: 1 }
-
-  /* album art — responsive al espacio disponible */
-  .art-section { flex-shrink: 0 }
-  .art-wrap {
-    position: relative;
-    /* min(vw-based, vh-based, px cap) — se adapta al tamaño de ventana */
-    width: min(min(30vw, 38vh), 300px);
-    aspect-ratio: 1;
-    border-radius: clamp(12px, 2vw, 20px);
-    overflow: hidden;
-    box-shadow:
-      0 30px 90px rgba(0,0,0,0.8),
-      0 0 0 1px rgba(var(--accent-rgb), 0.15),
-      0 0 70px rgba(var(--accent-rgb), 0.25)
-  }
-  .art-wrap.art-empty {
-    background: var(--sf1);
-    display: flex; align-items: center; justify-content: center
-  }
-  .art-glyph { font-size: min(5rem, 8vw); color: var(--muted2) }
-  .art-img {
-    width: 100%; height: 100%; object-fit: cover;
-    position: relative; z-index: 1; transition: transform 0.4s ease
-  }
-  .art-wrap:hover .art-img { transform: scale(1.02) }
-  .art-glow {
-    position: absolute; inset: -30%; width: 160%; height: 160%;
-    object-fit: cover;
-    filter: blur(50px) saturate(3.5) brightness(0.55);
-    opacity: 0.70; z-index: 0;
-    transition: opacity 0.8s ease
-  }
-
-  /* track info */
-  .track-info { width: 100%; max-width: 640px; text-align: center }
-  .track-title {
-    font-size: 1.25rem; font-weight: 700; line-height: 1.3;
-    letter-spacing: -0.01em;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-    overflow: hidden
-  }
-  .track-sub {
-    font-size: 0.84rem; color: var(--muted); margin-top: 0.25rem;
-    display: flex; gap: 0.4rem; justify-content: center; align-items: center; flex-wrap: wrap
-  }
-  .track-artist { color: var(--text) }
-  .dot          { color: var(--muted2) }
-  .track-album  { font-style: italic }
-  .badges {
-    display: flex; gap: 0.3rem; justify-content: center; flex-wrap: wrap; margin-top: 0.45rem
-  }
-  .badge {
-    font-size: 0.6rem; font-weight: 700; letter-spacing: 0.07em;
-    padding: 2px 8px; border-radius: 20px;
-    background: var(--sf2); color: var(--muted); border: 1px solid var(--border)
-  }
-  .badge-dsd  { color: var(--dsd); border-color: var(--dsd)44; background: var(--dsd)12 }
-  .badge-excl { color: var(--accent); border-color: var(--accent-30); background: var(--accent-08) }
-  .track-empty { color: var(--muted); font-size: 0.85rem }
-
-  /* loading animation */
-  .loading-dots { display: flex; gap: 6px; justify-content: center; padding: 1rem 0 }
-  .loading-dots span {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: var(--accent); animation: blink 1s ease-in-out infinite
-  }
-  .loading-dots span:nth-child(2) { animation-delay: .2s }
-  .loading-dots span:nth-child(3) { animation-delay: .4s }
-  @keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
-
-  /* waveform */
-  .waveform { width: 100%; max-width: 640px; height: 72px; display: block; border-radius: 8px }
-
-  /* progress */
-  .progress-section {
-    display: flex; align-items: center; gap: 0.6rem;
-    width: 100%; max-width: 640px
-  }
-  .time {
-    font-size: 0.68rem; color: var(--muted); min-width: 2.8rem;
-    font-variant-numeric: tabular-nums; font-feature-settings: "tnum"
-  }
-  .progress-track {
-    flex: 1; height: 4px; background: var(--sf3); border-radius: 2px;
-    cursor: pointer; position: relative; transition: height .15s
-  }
-  .progress-track:hover { height: 6px }
-  .progress-fill {
-    height: 100%;
-    background: linear-gradient(90deg,
-      rgba(var(--accent-rgb), 0.7) 0%,
-      var(--accent) 60%,
-      rgba(var(--accent-rgb), 0.9) 100%);
-    border-radius: 2px; position: relative; transition: width .25s linear;
-    box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.5)
-  }
-  .progress-thumb {
-    position: absolute; right: -6px; top: 50%;
-    width: 12px; height: 12px; border-radius: 50%;
-    background: #fff; box-shadow: 0 0 8px var(--accent-50);
-    transform: translateY(-50%) scale(0);
-    transition: transform .15s; pointer-events: none
-  }
-  .progress-track:hover .progress-thumb,
-  .progress-track.dragging .progress-thumb { transform: translateY(-50%) scale(1) }
-  .progress-track.dragging { cursor: grabbing; height: 6px }
-
-  /* transport */
-  .transport { display: flex; align-items: center; gap: 0.6rem }
-  .ctrl-btn {
-    background: none; border: none; color: var(--muted); cursor: pointer;
-    padding: 0.5rem; border-radius: 50%; transition: color .15s, background .15s;
-    display: flex; align-items: center; justify-content: center; width: 40px; height: 40px
-  }
-  .ctrl-btn svg { width: 20px; height: 20px }
-  .ctrl-btn:hover:not(:disabled) { color: var(--text); background: var(--sf2) }
-  .ctrl-btn:disabled { opacity: 0.2; cursor: not-allowed }
-  .play-btn {
-    background: var(--accent); border: none; color: #000; cursor: pointer;
-    width: 54px; height: 54px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 0 20px var(--accent-30), 0 4px 12px rgba(0,0,0,0.4);
-    transition: transform .15s, box-shadow .15s, filter .15s
-  }
-  .play-btn svg { width: 24px; height: 24px }
-  .play-btn:hover:not(:disabled) {
-    transform: scale(1.07);
-    box-shadow: 0 0 30px var(--accent-50), 0 6px 18px rgba(0,0,0,0.5);
-    filter: brightness(1.12)
-  }
-  .play-btn:disabled { opacity: 0.3; cursor: not-allowed }
-
-  /* toggles */
-  .toggles { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: center }
-  .tog {
-    display: flex; align-items: center; gap: 5px;
-    background: none; border: 1px solid var(--border); color: var(--muted);
-    font-size: 0.7rem; font-weight: 600; padding: 0.3rem 0.7rem;
-    border-radius: 20px; cursor: pointer; transition: all .15s
-  }
-  .tog:hover   { border-color: var(--muted2); color: var(--text) }
-  .tog.tog-on  { border-color: var(--accent); color: var(--accent); background: var(--accent-08) }
-  .excl-tog.tog-on { border-color: #4caf50; color: #4caf50; background: #4caf5012 }
-
-  /* volume */
-  .volume-row {
-    display: flex; align-items: center; gap: 0.6rem;
-    width: 100%; max-width: 380px
-  }
-  .vol-icon { color: var(--muted); flex-shrink: 0 }
-  .vol-slider {
-    flex: 1;
-    -webkit-appearance: none; height: 4px; border-radius: 2px;
-    background: linear-gradient(90deg, var(--accent) calc(var(--vol)*100%), var(--sf3) 0%);
-    cursor: pointer; outline: none
-  }
-  .vol-slider::-webkit-slider-thumb {
-    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
-    background: #fff; box-shadow: 0 0 6px var(--accent-50); cursor: pointer
-  }
-  .vol-pct { font-size: 0.68rem; color: var(--muted); min-width: 2.5rem; text-align: right;
-             font-variant-numeric: tabular-nums }
-
-  /* ════════════════ LYRICS PANEL (right column) ═════════════════════ */
-  .lyrics-panel {
-    background: linear-gradient(
-      175deg,
-      rgba(var(--accent-rgb), 0.06) 0%,
-      var(--sf1) 20%
-    );
-    border-left: 1px solid rgba(var(--accent-rgb), 0.12);
-    display: flex; flex-direction: column;
-    overflow: hidden;
-    animation: slide-in .22s ease-out;
-    transition: background 0.6s ease;
-  }
-  @keyframes slide-in {
-    from { opacity: 0; transform: translateX(20px) }
-    to   { opacity: 1; transform: translateX(0) }
-  }
-  .lyrics-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 0.7rem 1rem; border-bottom: 1px solid var(--border); flex-shrink: 0;
-    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--muted)
-  }
-  .lyrics-close {
-    background: none; border: none; color: var(--muted); cursor: pointer;
-    font-size: 0.75rem; padding: 2px 6px; border-radius: 4px;
-    transition: color .12s
-  }
-  .lyrics-close:hover { color: var(--text) }
-  .lyrics-list {
-    flex: 1; overflow-y: auto; padding: 1.5rem 0;
-    mask-image: linear-gradient(transparent, black 8%, black 92%, transparent);
-    -webkit-mask-image: linear-gradient(transparent, black 8%, black 92%, transparent)
-  }
-  .lyric {
-    /* font-size, opacity, transform, filter vienen del inline style  */
-    color: var(--text);
-    text-align: center;
-    padding: 0.26rem 1.4rem;
-    line-height: 1.85;
-    transform-origin: center center;
-    cursor: default;
-    transition:
-      font-size  0.38s cubic-bezier(0.4, 0, 0.2, 1),
-      opacity    0.38s cubic-bezier(0.4, 0, 0.2, 1),
-      transform  0.38s cubic-bezier(0.4, 0, 0.2, 1),
-      filter     0.38s cubic-bezier(0.4, 0, 0.2, 1),
-      color      0.30s ease,
-      text-shadow 0.30s ease;
-  }
-  .lyric-active {
-    font-weight: 700;
-    color: var(--accent);
-    text-shadow:
-      0 0 30px rgba(var(--accent-rgb), 0.55),
-      0 0 60px rgba(var(--accent-rgb), 0.20);
-    padding: 0.38rem 1.4rem;
-  }
-
-  /* lyrics empty / not-found state */
-  .lyrics-empty {
-    flex: 1;
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    gap: 0.7rem; padding: 1.5rem; text-align: center;
-    color: var(--muted);
-  }
-  .lyrics-glyph { font-size: 2.2rem; opacity: 0.35 }
-  .lyrics-empty p { font-size: 0.8rem }
-  .lyrics-empty-title { font-weight: 600; color: var(--text); font-size: 0.85rem !important }
-  .lyrics-empty-sub   { color: var(--muted); font-size: 0.72rem !important; max-width: 220px; line-height: 1.5 }
-  .retry-btn {
-    display: flex; align-items: center; gap: 0.4rem;
-    background: var(--accent-08); color: var(--accent);
-    border: 1px solid rgba(var(--accent-rgb), 0.4);
-    padding: 0.45rem 0.9rem; border-radius: 20px;
-    font-size: 0.74rem; font-weight: 600;
-    cursor: pointer; margin-top: 0.4rem;
-    transition: background .15s, transform .15s
-  }
-  .retry-btn:hover { background: var(--accent-15); transform: translateY(-1px) }
-  .retry-btn:active { transform: translateY(0) }
-
-  /* error */
-  .error-bar {
-    width: 100%; max-width: 640px;
-    background: #2a0f0f; border: 1px solid #6b1818; border-radius: var(--r);
-    padding: 0.4rem 0.75rem; font-size: 0.75rem; color: #f08080;
-    display: flex; justify-content: space-between; align-items: center; gap: 0.5rem
-  }
-  .error-bar button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.8rem }
 </style>

@@ -1,0 +1,233 @@
+/* ── design tokens ──────────────────────────────────────────────────── */
+:root {
+  --accent:     #1db954;
+  --accent-rgb: 29,185,84;
+  --accent-fg:  #0a0a0c;
+  --beat:       0;
+  --accent-08:  rgba(29,185,84,0.08);
+  --accent-15:  rgba(29,185,84,0.15);
+  --accent-30:  rgba(29,185,84,0.30);
+  --accent-50:  rgba(29,185,84,0.50);
+
+  --bg:      #0a0a0c;
+  --sf1:     #111115;
+  --sf2:     #16161b;
+  --sf3:     #1e1e25;
+  --border:  #202028;
+  --text:    #ebebf0;
+  --muted:   #52525f;
+  --muted2:  #3a3a45;
+  --dsd:     #f5a623;
+  --r:       8px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0 }
+
+/* ── scrollbars: thin + discreet instead of the chunky native Windows bar ── */
+* { scrollbar-width: thin; scrollbar-color: var(--muted2) transparent }
+*::-webkit-scrollbar { width: 8px; height: 8px }
+*::-webkit-scrollbar-track { background: transparent }
+*::-webkit-scrollbar-thumb {
+  background: var(--muted2); border-radius: 6px;
+  border: 2px solid transparent; background-clip: padding-box;  /* inset = floating look */
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--muted) }
+*::-webkit-scrollbar-corner { background: transparent }
+
+/* Lyrics surfaces hide the bar entirely: the synced auto-scroll drives them
+   and the top/bottom mask already fades the edges — a visible track felt
+   unnatural here. Wheel/trackpad scrolling still works. */
+.lyrics-list, .np-lyrics { scrollbar-width: none }
+.lyrics-list::-webkit-scrollbar, .np-lyrics::-webkit-scrollbar { width: 0; height: 0; display: none }
+
+/* SVG icons inside buttons MUST NOT intercept pointer events.
+   Otherwise the click target is the <path> and the button's onclick
+   never fires — that was the cause of the play button not pausing. */
+button svg, button svg * { pointer-events: none }
+
+/* ════ shared component classes (used by 2+ components) ═══════════════ */
+
+/* badges (Player + NowPlaying) */
+.dot { color: var(--muted2) }
+.badges {
+  display: flex; gap: 0.3rem; justify-content: center; flex-wrap: wrap; margin-top: 0.45rem
+}
+.badge {
+  font-size: 0.6rem; font-weight: 700; letter-spacing: 0.07em;
+  padding: 2px 8px; border-radius: 20px;
+  background: var(--sf2); color: var(--muted); border: 1px solid var(--border)
+}
+.badge-dsd  { color: var(--dsd); border-color: var(--dsd)44; background: var(--dsd)12 }
+.badge-excl { color: var(--accent); border-color: var(--accent-30); background: var(--accent-08) }
+
+/* loading animation (Player + LyricsPanel) */
+.loading-dots { display: flex; gap: 6px; justify-content: center; padding: 1rem 0 }
+.loading-dots span {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); animation: blink 1s ease-in-out infinite
+}
+.loading-dots span:nth-child(2) { animation-delay: .2s }
+.loading-dots span:nth-child(3) { animation-delay: .4s }
+@keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
+
+/* progress (Player + NowPlaying) */
+.progress-section {
+  display: flex; align-items: center; gap: 0.6rem;
+  width: 100%; max-width: 640px
+}
+.time {
+  font-size: 0.68rem; color: var(--muted); min-width: 2.8rem;
+  font-variant-numeric: tabular-nums; font-feature-settings: "tnum"
+}
+.progress-track {
+  flex: 1; height: 4px; background: var(--sf3); border-radius: 2px;
+  cursor: pointer; position: relative; transition: height .15s
+}
+.progress-track:hover { height: 6px }
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg,
+    rgba(var(--accent-rgb), 0.7) 0%,
+    var(--accent) 60%,
+    rgba(var(--accent-rgb), 0.9) 100%);
+  border-radius: 2px; position: relative; transition: width .25s linear;
+  box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.5)
+}
+.progress-thumb {
+  position: absolute; right: -6px; top: 50%;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 8px var(--accent-50);
+  transform: translateY(-50%) scale(0);
+  transition: transform .15s; pointer-events: none
+}
+.progress-track:hover .progress-thumb,
+.progress-track.dragging .progress-thumb { transform: translateY(-50%) scale(1) }
+.progress-track.dragging { cursor: grabbing; height: 6px }
+/* While scrubbing the fill is driven by the optimistic seekPreview, which
+   already tracks the cursor 1:1 — the 0.25s width tween would only add lag. */
+.progress-track.dragging .progress-fill { transition: none }
+
+/* transport (Player + NowPlaying) */
+.transport { display: flex; align-items: center; gap: 0.6rem }
+.ctrl-btn {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  padding: 0.5rem; border-radius: 50%; transition: color .15s, background .15s;
+  display: flex; align-items: center; justify-content: center; width: 40px; height: 40px
+}
+.ctrl-btn svg { width: 20px; height: 20px }
+.ctrl-btn:hover:not(:disabled) { color: var(--text); background: var(--sf2) }
+.ctrl-btn:disabled { opacity: 0.2; cursor: not-allowed }
+.play-btn {
+  background: var(--accent); border: none; color: var(--accent-fg); cursor: pointer;
+  width: 54px; height: 54px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 20px var(--accent-30), 0 4px 12px rgba(0,0,0,0.4);
+  transition: transform .15s, box-shadow .15s, filter .15s, color .4s ease
+}
+.play-btn svg { width: 24px; height: 24px }
+.play-btn:hover:not(:disabled) {
+  transform: scale(1.07);
+  box-shadow: 0 0 30px var(--accent-50), 0 6px 18px rgba(0,0,0,0.5);
+  filter: brightness(1.12)
+}
+.play-btn:disabled { opacity: 0.3; cursor: not-allowed }
+
+/* toggles (Player + NowPlaying + SettingsModal) */
+.tog {
+  display: flex; align-items: center; gap: 5px;
+  background: none; border: 1px solid var(--border); color: var(--muted);
+  font-size: 0.7rem; font-weight: 600; padding: 0.3rem 0.7rem;
+  border-radius: 20px; cursor: pointer; transition: all .15s
+}
+.tog:hover   { border-color: var(--muted2); color: var(--text) }
+.tog.tog-on  { border-color: var(--accent); color: var(--accent); background: var(--accent-08) }
+
+/* volume (Player + NowPlaying; slider also in SettingsModal) */
+.volume-row {
+  display: flex; align-items: center; gap: 0.6rem;
+  width: 100%; max-width: 380px
+}
+.vol-icon { color: var(--muted); flex-shrink: 0 }
+.vol-slider {
+  flex: 1;
+  -webkit-appearance: none; height: 4px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent) calc(var(--vol)*100%), var(--sf3) 0%);
+  cursor: pointer; outline: none
+}
+.vol-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 6px var(--accent-50); cursor: pointer
+}
+.vol-pct { font-size: 0.68rem; color: var(--muted); min-width: 2.5rem; text-align: right;
+           font-variant-numeric: tabular-nums }
+
+/* search input (Sidebar + AddToPlaylistModal) */
+.search-input {
+  width: 100%; background: var(--sf2); border: 1px solid var(--border);
+  color: var(--text); font-size: 0.76rem; padding: 0.35rem 0.6rem;
+  border-radius: 6px; outline: none; transition: border-color .15s
+}
+.search-input:focus { border-color: var(--accent) }
+.search-input::placeholder { color: var(--muted) }
+
+/* mini buttons (Sidebar + AddToPlaylistModal) */
+.mini-btn {
+  background: var(--sf2); border: 1px solid var(--border); color: var(--muted);
+  font-size: 0.64rem; font-weight: 700; padding: 0.25rem 0.6rem;
+  border-radius: 6px; cursor: pointer; transition: background .12s, color .12s
+}
+.mini-btn:hover        { background: var(--sf3); color: var(--text) }
+.mini-btn.accent       { color: var(--accent); border-color: var(--accent-30) }
+.mini-btn.accent:hover { background: var(--accent-15) }
+.mini-btn:disabled     { opacity: 0.4; cursor: not-allowed }
+.newlist-row { display: flex; gap: 5px; align-items: center }
+.newlist-row .search-input { flex: 1 }
+
+/* close button (LyricsPanel + both modals) */
+.lyrics-close {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 0.75rem; padding: 2px 6px; border-radius: 4px;
+  transition: color .12s
+}
+.lyrics-close:hover { color: var(--text) }
+
+/* modal scaffolding (SettingsModal + AddToPlaylistModal) */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  animation: fade-in .18s ease-out
+}
+@keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+.settings-card {
+  width: min(420px, 90vw);
+  background: linear-gradient(175deg, rgba(var(--accent-rgb),0.07) 0%, var(--sf1) 22%);
+  border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0,0,0,0.6), 0 0 0 1px rgba(var(--accent-rgb),0.10);
+  padding: 0.4rem 0 0.9rem;
+  animation: pop-in .2s cubic-bezier(0.2, 0.9, 0.3, 1.2)
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.95) translateY(8px) }
+  to   { opacity: 1; transform: scale(1) translateY(0) }
+}
+.settings-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.7rem 1.1rem; border-bottom: 1px solid var(--border);
+  font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted)
+}
+.set-row {
+  display: flex; flex-direction: column; gap: 0.55rem;
+  padding: 0.85rem 1.1rem
+}
+
+/* ── accessibility: honour reduced-motion ──────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

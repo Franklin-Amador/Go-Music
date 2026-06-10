@@ -18,6 +18,16 @@ type webConfig struct {
 	Shuffle   bool     `json:"shuffle"`
 	Repeat    bool     `json:"repeat"`
 	MusicRoot string   `json:"musicRoot"`
+
+	// UI-only preferences (no engine effect). Persisted so the look survives
+	// restarts. VisualizerMode: "bars" | "wave" | "radial". AccentSource:
+	// "auto" (dominant colour from album art) | "fixed" (default green).
+	VisualizerMode string `json:"visualizerMode"`
+	AccentSource   string `json:"accentSource"`
+
+	// OutputDevice is the hex token of the chosen exclusive-mode DAC ("" =
+	// system default).
+	OutputDevice string `json:"outputDevice"`
 }
 
 func webConfigPath() string {
@@ -39,18 +49,27 @@ func loadConfig() webConfig {
 	if c.Volume <= 0 {
 		c.Volume = 1.0
 	}
+	if c.VisualizerMode == "" {
+		c.VisualizerMode = "bars"
+	}
+	if c.AccentSource == "" {
+		c.AccentSource = "auto"
+	}
 	return c
 }
 
 // saveConfig persists the current engine + playlist state.
 func (a *App) saveConfig() {
 	c := webConfig{
-		Volume:    a.eng.Volume,
-		Exclusive: a.eng.ExclusiveMode(),
-		Crossfade: a.eng.CrossfadeSeconds(),
-		Shuffle:   a.pl.Shuffle,
-		Repeat:    a.repeatOne.Load(),
-		Current:   a.pl.Current,
+		Volume:         a.eng.Volume,
+		Exclusive:      a.eng.ExclusiveMode(),
+		Crossfade:      a.eng.CrossfadeSeconds(),
+		Shuffle:        a.pl.Shuffle,
+		Repeat:         a.repeatOne.Load(),
+		Current:        a.pl.Current,
+		VisualizerMode: a.uiVisualizerMode,
+		AccentSource:   a.uiAccentSource,
+		OutputDevice:   a.eng.OutputDevice(),
 	}
 	for _, t := range a.pl.Tracks {
 		c.Playlist = append(c.Playlist, t.Path)

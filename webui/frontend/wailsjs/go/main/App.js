@@ -10,8 +10,20 @@ export function AddFolder(arg1) {
   return window['go']['main']['App']['AddFolder'](arg1);
 }
 
+export function AddToPlaylist(arg1, arg2) {
+  return window['go']['main']['App']['AddToPlaylist'](arg1, arg2);
+}
+
 export function ClearPlaylist() {
   return window['go']['main']['App']['ClearPlaylist']();
+}
+
+export function CreatePlaylist(arg1) {
+  return window['go']['main']['App']['CreatePlaylist'](arg1);
+}
+
+export function DeletePlaylist(arg1) {
+  return window['go']['main']['App']['DeletePlaylist'](arg1);
 }
 
 export function GetCrossfade() {
@@ -34,12 +46,24 @@ export function GetLibrarySongs() {
   return window['go']['main']['App']['GetLibrarySongs']();
 }
 
+export function GetOutputDevice() {
+  return window['go']['main']['App']['GetOutputDevice']();
+}
+
 export function GetOutputMode() {
   return window['go']['main']['App']['GetOutputMode']();
 }
 
 export function GetPlaylist() {
   return window['go']['main']['App']['GetPlaylist']();
+}
+
+export function GetPlaylistTracks(arg1) {
+  return window['go']['main']['App']['GetPlaylistTracks'](arg1);
+}
+
+export function GetPlaylists() {
+  return window['go']['main']['App']['GetPlaylists']();
 }
 
 export function GetSpectrum() {
@@ -66,12 +90,20 @@ export function IsShuffle() {
   return window['go']['main']['App']['IsShuffle']();
 }
 
+export function ListOutputDevices() {
+  return window['go']['main']['App']['ListOutputDevices']();
+}
+
 export function LoadAlbum(arg1, arg2) {
   return window['go']['main']['App']['LoadAlbum'](arg1, arg2);
 }
 
 export function LoadFile(arg1) {
   return window['go']['main']['App']['LoadFile'](arg1);
+}
+
+export function MoveTrack(arg1, arg2) {
+  return window['go']['main']['App']['MoveTrack'](arg1, arg2);
 }
 
 export function Next() {
@@ -98,16 +130,36 @@ export function PlayAt(arg1) {
   return window['go']['main']['App']['PlayAt'](arg1);
 }
 
+export function PlayPlaylist(arg1) {
+  return window['go']['main']['App']['PlayPlaylist'](arg1);
+}
+
 export function PlaySong(arg1) {
   return window['go']['main']['App']['PlaySong'](arg1);
+}
+
+export function PlaySongs(arg1, arg2) {
+  return window['go']['main']['App']['PlaySongs'](arg1, arg2);
 }
 
 export function Prev() {
   return window['go']['main']['App']['Prev']();
 }
 
+export function QueuePlaylist(arg1) {
+  return window['go']['main']['App']['QueuePlaylist'](arg1);
+}
+
 export function Remove(arg1) {
   return window['go']['main']['App']['Remove'](arg1);
+}
+
+export function RemoveFromPlaylist(arg1, arg2) {
+  return window['go']['main']['App']['RemoveFromPlaylist'](arg1, arg2);
+}
+
+export function RenamePlaylist(arg1, arg2) {
+  return window['go']['main']['App']['RenamePlaylist'](arg1, arg2);
 }
 
 export function RetryLyrics() {
@@ -126,12 +178,20 @@ export function Seek(arg1) {
   return window['go']['main']['App']['Seek'](arg1);
 }
 
+export function SetAccentSource(arg1) {
+  return window['go']['main']['App']['SetAccentSource'](arg1);
+}
+
 export function SetCrossfade(arg1) {
   return window['go']['main']['App']['SetCrossfade'](arg1);
 }
 
 export function SetExclusive(arg1) {
   return window['go']['main']['App']['SetExclusive'](arg1);
+}
+
+export function SetOutputDevice(arg1) {
+  return window['go']['main']['App']['SetOutputDevice'](arg1);
 }
 
 export function SetRepeat(arg1) {
@@ -142,10 +202,18 @@ export function SetShuffle(arg1) {
   return window['go']['main']['App']['SetShuffle'](arg1);
 }
 
+export function SetVisualizerMode(arg1) {
+  return window['go']['main']['App']['SetVisualizerMode'](arg1);
+}
+
 export function SetVolume(arg1) {
   return window['go']['main']['App']['SetVolume'](arg1);
 }
 
 export function Stop() {
   return window['go']['main']['App']['Stop']();
+}
+
+export function UpNext() {
+  return window['go']['main']['App']['UpNext']();
 }

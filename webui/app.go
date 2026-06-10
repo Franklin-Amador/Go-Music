@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"gomusic/audio"
 	"gomusic/library"
@@ -35,6 +36,14 @@ type TrackInfo struct {
 type PositionInfo struct {
 	Pos float64 `json:"pos"`
 	Dur float64 `json:"dur"`
+}
+
+// VizData is the visualizer push payload: one event carries both the FFT
+// spectrum and the peak-envelope waveform, replacing the old per-frame
+// GetSpectrum/GetWaveform IPC polling from the frontend.
+type VizData struct {
+	Spectrum []float32 `json:"spectrum"`
+	Waveform []float32 `json:"waveform"`
 }
 
 type PlaylistTrack struct {
@@ -76,6 +85,22 @@ type App struct {
 	// library — guarded by libMu.
 	lib   *library.Library
 	libMu sync.Mutex
+
+	// UI-only preferences mirrored here so saveConfig can persist them.
+	// Written from JS via the Set* binds; read on shutdown. The races are
+	// benign (last-writer-wins on a short string).
+	uiVisualizerMode string
+	uiAccentSource   string
+
+	// Named playlists (separate from the live queue). Persisted in
+	// playlists-web.json; guarded by namedListsMu.
+	namedLists   []SavedPlaylist
+	namedListsMu sync.Mutex
+
+	// Visualizer push ticker (~30 fps "viz-data" events while playing).
+	// vizStop is non-nil iff the ticker goroutine is running; guarded by vizMu.
+	vizStop chan struct{}
+	vizMu   sync.Mutex
 }
 
 func NewApp() *App {
@@ -94,10 +119,16 @@ func (a *App) startup(ctx context.Context) {
 	a.eng.Volume = cfg.Volume
 	a.eng.SetExclusiveMode(cfg.Exclusive)
 	a.eng.SetCrossfade(cfg.Crossfade)
+	a.eng.SetOutputDevice(cfg.OutputDevice)
 	if cfg.Shuffle {
 		a.pl.ToggleShuffle()
 	}
 	a.repeatOne.Store(cfg.Repeat)
+	a.uiVisualizerMode = cfg.VisualizerMode
+	a.uiAccentSource = cfg.AccentSource
+
+	// Restore saved playlists.
+	a.namedLists = loadNamedPlaylists()
 
 	// Restore playlist (paths only — no auto-play on startup).
 	for _, path := range cfg.Playlist {
@@ -110,6 +141,9 @@ func (a *App) startup(ctx context.Context) {
 	// ── engine callbacks → Wails events ──────────────────────────────────────
 
 	a.eng.OnStateChange = func(s audio.State) {
+		// Push visualizer data only while actually playing — the ticker is
+		// the sole source of viz frames, so idle/paused means zero viz work.
+		a.setVizPush(s == audio.StatePlaying)
 		runtime.EventsEmit(a.ctx, "state-change", s.String())
 	}
 
@@ -144,6 +178,7 @@ func (a *App) startup(ctx context.Context) {
 		}
 		next := a.pl.Next()
 		if next == nil {
+			a.setVizPush(false)
 			runtime.EventsEmit(a.ctx, "state-change", "Stopped")
 			return
 		}
@@ -183,8 +218,52 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(_ context.Context) {
+	a.setVizPush(false)
 	a.eng.Stop()
 	a.saveConfig()
+}
+
+// setVizPush starts/stops the ~30 fps goroutine that pushes "viz-data" events
+// (spectrum + waveform in a single payload) to the frontend. Idempotent and
+// mutex-guarded: starting while running or stopping while stopped is a no-op,
+// so it can be called from every state transition. The goroutine exits on
+// stop or when the Wails context is canceled (shutdown) — no leak, no emit
+// after teardown. It only READS the engine's Vis snapshots, same as the
+// GetSpectrum/GetWaveform binds — no audio hot path involved.
+func (a *App) setVizPush(on bool) {
+	a.vizMu.Lock()
+	defer a.vizMu.Unlock()
+
+	if !on {
+		if a.vizStop != nil {
+			close(a.vizStop)
+			a.vizStop = nil
+		}
+		return
+	}
+	if a.vizStop != nil || a.ctx == nil {
+		return // already running / not started yet
+	}
+	stop := make(chan struct{})
+	a.vizStop = stop
+	ctx := a.ctx
+	go func() {
+		t := time.NewTicker(33 * time.Millisecond) // ~30 fps
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				runtime.EventsEmit(ctx, "viz-data", VizData{
+					Spectrum: a.eng.Vis.Snapshot(),
+					Waveform: a.eng.Vis.Waveform(96, 38),
+				})
+			}
+		}
+	}()
 }
 
 // ── internal helpers ──────────────────────────────────────────────────────────
@@ -402,6 +481,31 @@ func (a *App) Prev() (*TrackInfo, error) {
 	return ti, nil
 }
 
+// UpNext returns the track that Next() would play, respecting shuffle order,
+// without advancing the playlist. Returns nil at the end of the queue. Used by
+// the immersive view's "Up next" card.
+func (a *App) UpNext() *PlaylistTrack {
+	t := a.pl.PeekNext()
+	if t == nil {
+		return nil
+	}
+	for i, tr := range a.pl.Tracks {
+		if tr.Path == t.Path {
+			return &PlaylistTrack{Index: i, Path: t.Path, Title: t.Title}
+		}
+	}
+	return nil
+}
+
+// MoveTrack reorders the queue, moving the track at `from` to index `to`.
+// The current-track highlight follows the move (playlist.Move patches Current).
+func (a *App) MoveTrack(from, to int) []PlaylistTrack {
+	a.pl.Move(from, to)
+	snap := a.playlistSnapshot()
+	runtime.EventsEmit(a.ctx, "playlist-updated", snap)
+	return snap
+}
+
 // Remove removes a track from the playlist by index.
 func (a *App) Remove(index int) []PlaylistTrack {
 	a.pl.Remove(index)
@@ -443,8 +547,27 @@ func (a *App) SetExclusive(on bool)  { a.eng.SetExclusiveMode(on) }
 func (a *App) IsExclusive() bool     { return a.eng.ExclusiveMode() }
 func (a *App) GetOutputMode() string { return a.eng.OutputMode() }
 
+// ListOutputDevices enumerates the available playback endpoints (DACs etc.).
+// Call it each time the picker opens so hot-plugged devices appear.
+func (a *App) ListOutputDevices() []audio.OutputDevice {
+	devs, err := audio.ListPlaybackDevices()
+	if err != nil {
+		return nil
+	}
+	return devs
+}
+
+// SetOutputDevice picks the exclusive-mode endpoint by its hex token ("" =
+// system default). Applies on the next track / re-play. Persisted via saveConfig.
+func (a *App) SetOutputDevice(id string) { a.eng.SetOutputDevice(id) }
+func (a *App) GetOutputDevice() string   { return a.eng.OutputDevice() }
+
 func (a *App) SetCrossfade(sec float64) { a.eng.SetCrossfade(sec) }
 func (a *App) GetCrossfade() float64    { return a.eng.CrossfadeSeconds() }
+
+// UI-only preference setters (persisted by saveConfig; no engine effect).
+func (a *App) SetVisualizerMode(mode string) { a.uiVisualizerMode = mode }
+func (a *App) SetAccentSource(src string)    { a.uiAccentSource = src }
 
 // GetWaveform returns the latest peak-envelope data (96 points, 38 ms window).
 // Called from a Wails goroutine — equivalent to the UI-ticker pattern in AGENTS.md §10.
@@ -469,6 +592,25 @@ func (a *App) RetryLyrics() {
 	// Clear by artist+title — same key audio/lyrics.go uses internally.
 	audio.ClearLyricsCacheFor(info.Artist, info.Title)
 	go a.fetchAndEmitLyrics(info)
+}
+
+// PlaySongs replaces the queue with the given ordered track list and plays
+// from startIndex. Used by list views (Songs library, an expanded saved
+// playlist) so the list becomes the playback context — Next/Prev then walk
+// the whole list instead of dead-ending on a single track.
+func (a *App) PlaySongs(paths []string, startIndex int) (*TrackInfo, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	if startIndex < 0 || startIndex >= len(paths) {
+		startIndex = 0
+	}
+	a.eng.Stop()
+	a.pl.Clear()
+	for _, p := range paths {
+		a.pl.Add(p)
+	}
+	return a.PlayAt(startIndex)
 }
 
 // PlaySong loads path, adds it to the playlist if absent, and starts playing.

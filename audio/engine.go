@@ -150,10 +150,25 @@ type Engine struct {
 	dsdSeekBytes int64
 	dsdSeekTime  float64
 
+	// seeking is true only for the brief window of a DSD seek, where we tear
+	// the producer down and restart it at a new offset via stopInternal +
+	// playDSD. stopInternal normally ends with setState(StateStopped); during
+	// a seek that transient "Stopped" would make the UI snap the progress bar
+	// to 0 and flip the play button. While seeking is set, stopInternal skips
+	// that emission — playDSD re-emits Playing once the new producer is ready.
+	seeking atomic.Bool
+
 	// exclusiveDisabled lets the user force WASAPI shared mode (so other
 	// apps keep playing alongside us at the cost of going through the
 	// Windows mixer / resampler). Default false = try exclusive first.
 	exclusiveDisabled atomic.Bool
+
+	// outDeviceID is the hex token (from ListPlaybackDevices) of the chosen
+	// exclusive-mode output endpoint. nil/empty = system default device. Read
+	// lock-free by openPlayer; written when the user picks a DAC in settings.
+	// Applies to the NEXT openPlayer (i.e. next track / re-play). Shared (oto)
+	// fallback always uses the Windows default device regardless.
+	outDeviceID atomic.Pointer[string]
 
 	// outputModeAtomic records which backend is currently active:
 	// 0 = not yet opened, 1 = exclusive (malgo), 2 = shared (oto).
@@ -357,12 +372,24 @@ func (e *Engine) Seek(seconds float64) {
 
 	// DSD path: full producer restart at the new byte offset.
 	wasPlaying := State(e.state.Load()) == StatePlaying || State(e.state.Load()) == StatePaused
+
+	// Mark the restart as a seek so stopInternal doesn't emit a transient
+	// StateStopped (which the UI reads as "reset to 0"). Cleared once the new
+	// producer is up — or on the not-playing early return below.
+	e.seeking.Store(true)
 	e.stopInternal()
 	if !wasPlaying {
+		e.seeking.Store(false)
 		return
 	}
 	e.dsdSeekBytes, e.dsdSeekTime = computeDSDSeekOffset(e.dsdInfo, seconds)
-	_ = e.playDSD()
+	err := e.playDSD()
+	e.seeking.Store(false)
+	if err != nil {
+		// playDSD failed after we suppressed the Stopped emission — make the
+		// state honest again so the UI doesn't believe it's still playing.
+		e.setState(StateStopped)
+	}
 }
 
 // computeDSDSeekOffset returns (byteOffsetIntoAudio, actualSeekTimeSec) for
@@ -481,6 +508,25 @@ func (e *Engine) SetExclusiveMode(enabled bool) {
 // the current player is actually using).
 func (e *Engine) ExclusiveMode() bool {
 	return !e.exclusiveDisabled.Load()
+}
+
+// SetOutputDevice chooses the exclusive-mode output endpoint by its hex token
+// (from audio.ListPlaybackDevices). "" restores the system default. Takes
+// effect on the next Load()→Play() cycle, like SetExclusiveMode.
+func (e *Engine) SetOutputDevice(deviceHex string) {
+	if deviceHex == "" {
+		e.outDeviceID.Store(nil)
+		return
+	}
+	e.outDeviceID.Store(&deviceHex)
+}
+
+// OutputDevice returns the chosen device hex token, or "" for system default.
+func (e *Engine) OutputDevice() string {
+	if p := e.outDeviceID.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // OutputMode returns which audio backend is currently active: "exclusive"
@@ -1027,7 +1073,7 @@ func (e *Engine) openPlayer(r io.Reader) (audioPlayer, error) {
 		e.outputModeAtomic.Store(2)
 		return e.otoCtx.NewPlayer(r), nil
 	}
-	if p, err := newExclusivePlayer(r); err == nil {
+	if p, err := newExclusivePlayer(r, e.OutputDevice()); err == nil {
 		log.Printf("audio: WASAPI exclusive mode active")
 		e.outputModeAtomic.Store(1)
 		return p, nil
@@ -1188,7 +1234,12 @@ func (e *Engine) stopInternal() {
 	e.crossfadeFramesTotal = 0
 	e.cfMu.Unlock()
 
-	e.setState(StateStopped)
+	// During a DSD seek we're about to immediately restart the producer via
+	// playDSD; emitting StateStopped here would make the UI flash the progress
+	// bar to 0 and flip the play button. Skip it — playDSD re-emits Playing.
+	if !e.seeking.Load() {
+		e.setState(StateStopped)
+	}
 }
 
 // ── DSD producer ─────────────────────────────────────────────────────────────
