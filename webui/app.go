@@ -10,6 +10,7 @@ import (
 
 	"gomusic/audio"
 	"gomusic/library"
+	"gomusic/mediakeys"
 	"gomusic/playlist"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -47,10 +48,11 @@ type VizData struct {
 }
 
 type PlaylistTrack struct {
-	Index   int    `json:"index"`
-	Path    string `json:"path"`
-	Title   string `json:"title"`
-	Current bool   `json:"current"`
+	Index    int     `json:"index"`
+	Path     string  `json:"path"`
+	Title    string  `json:"title"`
+	Current  bool    `json:"current"`
+	Duration float64 `json:"duration"` // seconds; 0 when not yet known
 }
 
 type LyricLine struct {
@@ -63,9 +65,10 @@ type LyricLine struct {
 // App is the Wails application struct — all exported methods are callable from JS.
 //
 // Threading rule (mirrors AGENTS.md §9):
-//   All engine callbacks run on internal goroutines. Every UI mutation
-//   goes through runtime.EventsEmit, which posts to the WebView's thread.
-//   Never call loadAndPlay from inside an engine callback without `go`.
+//
+//	All engine callbacks run on internal goroutines. Every UI mutation
+//	goes through runtime.EventsEmit, which posts to the WebView's thread.
+//	Never call loadAndPlay from inside an engine callback without `go`.
 type App struct {
 	ctx context.Context
 	eng *audio.Engine
@@ -101,12 +104,20 @@ type App struct {
 	// vizStop is non-nil iff the ticker goroutine is running; guarded by vizMu.
 	vizStop chan struct{}
 	vizMu   sync.Mutex
+
+	// durCache remembers track durations (path → seconds) learned from
+	// sources that already paid the I/O cost — i.e. the engine after a Load
+	// or a crossfade transition. playlistSnapshot reads it so the Queue tab
+	// can show a running total without probing files. Guarded by durMu.
+	durCache map[string]float64
+	durMu    sync.Mutex
 }
 
 func NewApp() *App {
 	return &App{
-		eng: audio.NewEngine(),
-		pl:  playlist.New(),
+		eng:      audio.NewEngine(),
+		pl:       playlist.New(),
+		durCache: make(map[string]float64),
 	}
 }
 
@@ -201,7 +212,8 @@ func (a *App) startup(ctx context.Context) {
 		a.lastPreloadPath = ""
 		a.preloadMu.Unlock()
 
-		ti := toTrackInfo(info, a.eng.OutputMode())
+		a.rememberDuration(info)
+		ti := a.buildTrackInfo(info)
 		a.setWindowTitle(info)
 		runtime.EventsEmit(a.ctx, "track-change", ti)
 		runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
@@ -215,6 +227,35 @@ func (a *App) startup(ctx context.Context) {
 
 	// Try loading the library gob cache from the previous session.
 	go a.tryLoadLibraryCache()
+
+	// System-wide media keys (Play/Pause/Next/Prev/Stop). Callbacks fire on a
+	// dedicated Win32 message-pump thread — never on the UI thread — so they
+	// only call the same goroutine-safe engine/playlist paths the JS binds
+	// use; every UI update then flows through the existing engine-callback →
+	// EventsEmit plumbing. Registration failures (key held by another app)
+	// just log inside the package — never fatal.
+	mediakeys.Start(mediakeys.Handler{
+		OnPlayPause: func() {
+			if a.eng.CurrentState() == audio.StatePlaying {
+				a.eng.Pause()
+			} else {
+				// Resumes when paused; restarts the loaded track when stopped.
+				// Errors (nothing loaded yet) are harmless — ignore them.
+				_ = a.eng.Play()
+			}
+		},
+		OnNext: func() {
+			if next := a.pl.Next(); next != nil {
+				go a.loadAndPlay(next.Path)
+			}
+		},
+		OnPrev: func() {
+			if prev := a.pl.Prev(); prev != nil {
+				go a.loadAndPlay(prev.Path)
+			}
+		},
+		OnStop: func() { a.eng.Stop() },
+	})
 }
 
 func (a *App) shutdown(_ context.Context) {
@@ -288,7 +329,8 @@ func (a *App) loadAndPlay(path string) {
 		runtime.EventsEmit(a.ctx, "audio-error", err.Error())
 		return
 	}
-	ti := toTrackInfo(info, a.eng.OutputMode())
+	a.rememberDuration(info)
+	ti := a.buildTrackInfo(info)
 	a.setWindowTitle(info)
 	runtime.EventsEmit(a.ctx, "track-change", ti)
 	runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
@@ -316,16 +358,30 @@ func (a *App) fetchAndEmitLyrics(info *audio.FileInfo) {
 	runtime.EventsEmit(a.ctx, "lyrics", toLyricLines(lines))
 }
 
+// rememberDuration feeds the duration cache from an already-loaded FileInfo
+// (engine Load / crossfade transition) — no extra I/O, just bookkeeping.
+func (a *App) rememberDuration(info *audio.FileInfo) {
+	if info == nil || info.Path == "" || info.Duration <= 0 {
+		return
+	}
+	a.durMu.Lock()
+	a.durCache[info.Path] = info.Duration
+	a.durMu.Unlock()
+}
+
 func (a *App) playlistSnapshot() []PlaylistTrack {
 	out := make([]PlaylistTrack, len(a.pl.Tracks))
+	a.durMu.Lock()
 	for i, t := range a.pl.Tracks {
 		out[i] = PlaylistTrack{
-			Index:   i,
-			Path:    t.Path,
-			Title:   t.Title,
-			Current: i == a.pl.Current,
+			Index:    i,
+			Path:     t.Path,
+			Title:    t.Title,
+			Current:  i == a.pl.Current,
+			Duration: a.durCache[t.Path], // 0 when unknown
 		}
 	}
+	a.durMu.Unlock()
 	return out
 }
 
@@ -372,7 +428,8 @@ func (a *App) LoadFile(path string) (*TrackInfo, error) {
 	if err := a.eng.Play(); err != nil {
 		return nil, err
 	}
-	ti := toTrackInfo(info, a.eng.OutputMode())
+	a.rememberDuration(info)
+	ti := a.buildTrackInfo(info)
 	runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
 	go a.fetchAndEmitLyrics(info)
 	return ti, nil
@@ -423,7 +480,8 @@ func (a *App) PlayAt(index int) (*TrackInfo, error) {
 	if err := a.eng.Play(); err != nil {
 		return nil, err
 	}
-	ti := toTrackInfo(info, a.eng.OutputMode())
+	a.rememberDuration(info)
+	ti := a.buildTrackInfo(info)
 	runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
 	go a.fetchAndEmitLyrics(info)
 	return ti, nil
@@ -449,7 +507,8 @@ func (a *App) Next() (*TrackInfo, error) {
 	if err := a.eng.Play(); err != nil {
 		return nil, err
 	}
-	ti := toTrackInfo(info, a.eng.OutputMode())
+	a.rememberDuration(info)
+	ti := a.buildTrackInfo(info)
 	runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
 	go a.fetchAndEmitLyrics(info)
 	return ti, nil
@@ -475,7 +534,8 @@ func (a *App) Prev() (*TrackInfo, error) {
 	if err := a.eng.Play(); err != nil {
 		return nil, err
 	}
-	ti := toTrackInfo(info, a.eng.OutputMode())
+	a.rememberDuration(info)
+	ti := a.buildTrackInfo(info)
 	runtime.EventsEmit(a.ctx, "playlist-updated", a.playlistSnapshot())
 	go a.fetchAndEmitLyrics(info)
 	return ti, nil
@@ -523,9 +583,9 @@ func (a *App) ClearPlaylist() {
 
 // ── Bound methods — transport ─────────────────────────────────────────────────
 
-func (a *App) Play() error  { return a.eng.Play() }
-func (a *App) Pause()       { a.eng.Pause() }
-func (a *App) Stop()        { a.eng.Stop() }
+func (a *App) Play() error    { return a.eng.Play() }
+func (a *App) Pause()         { a.eng.Pause() }
+func (a *App) Stop()          { a.eng.Stop() }
 func (a *App) Seek(s float64) { a.eng.Seek(s) }
 
 func (a *App) SetVolume(v float32) { a.eng.Volume = v }
@@ -627,6 +687,18 @@ func (a *App) PlaySong(path string) (*TrackInfo, error) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+// buildTrackInfo is the single TrackInfo construction point for every
+// load/transition path. When the file carries no embedded art it kicks off
+// the online lookup (artfetch.go) on a goroutine — cache-first, silent on
+// miss — which reports back via the "art-found" event. Never blocks.
+func (a *App) buildTrackInfo(info *audio.FileInfo) *TrackInfo {
+	ti := toTrackInfo(info, a.eng.OutputMode())
+	if ti != nil && !ti.HasArt {
+		go a.fetchArtAsync(ti.Path, ti.Artist, ti.Album, ti.Title)
+	}
+	return ti
+}
+
 func toTrackInfo(info *audio.FileInfo, outputMode string) *TrackInfo {
 	if info == nil {
 		return nil
@@ -660,7 +732,7 @@ func displayTitle(info *audio.FileInfo) string {
 		return info.Title
 	}
 	base := filepath.Base(info.Path)
-	ext  := filepath.Ext(base)
+	ext := filepath.Ext(base)
 	return base[:len(base)-len(ext)]
 }
 

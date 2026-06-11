@@ -87,7 +87,7 @@
   .dev-select {
     width: 100%; background: var(--sf2); border: 1px solid var(--border);
     color: var(--text); font-size: 0.76rem; padding: 0.4rem 0.5rem;
-    border-radius: 7px; outline: none; cursor: pointer; transition: border-color .15s
+    border-radius: 6px; outline: none; cursor: pointer; transition: border-color .15s
   }
   .dev-select:focus { border-color: var(--accent) }
   .dev-select option { background: var(--sf1); color: var(--text) }

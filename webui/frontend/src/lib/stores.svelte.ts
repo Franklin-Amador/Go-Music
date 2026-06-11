@@ -10,7 +10,7 @@ export interface TrackInfo {
   duration: number; isDSD: boolean; hasArt: boolean
   artBase64: string; accentHex: string; outputMode: string
 }
-export interface PlaylistTrack { index: number; path: string; title: string; current: boolean }
+export interface PlaylistTrack { index: number; path: string; title: string; current: boolean; duration: number }
 export interface PlaylistMeta  { name: string; count: number }
 export interface OutputDevice  { id: string; name: string; isDefault: boolean }
 export interface LyricLine    { timeSec: number; text: string }
@@ -105,6 +105,9 @@ export const d = {
           x.album.toLowerCase().includes(s.songSearch.toLowerCase()))
       : s.songs
   },
+  // Plain (unsynced) lyrics have every timeSec = -1; the DoF renderer and
+  // auto-scroll only make sense when at least one line carries a timestamp.
+  get lyricsSynced() { return s.lyrics.some(l => l.timeSec >= 0) },
   get activeLyricIdx() {
     if (!s.lyrics.length) return -1
     let idx = -1

@@ -244,5 +244,6 @@
     padding: 0.4rem 0.75rem; font-size: 0.75rem; color: #f08080;
     display: flex; justify-content: space-between; align-items: center; gap: 0.5rem
   }
-  .error-bar button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.8rem }
+  .error-bar button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.8rem; transition: color .12s }
+  .error-bar button:hover { color: var(--text) }
 </style>

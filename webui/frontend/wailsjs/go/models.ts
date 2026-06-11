@@ -62,6 +62,7 @@ export namespace main {
 	    path: string;
 	    title: string;
 	    current: boolean;
+	    duration: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new PlaylistTrack(source);
@@ -73,6 +74,7 @@ export namespace main {
 	        this.path = source["path"];
 	        this.title = source["title"];
 	        this.current = source["current"];
+	        this.duration = source["duration"];
 	    }
 	}
 	export class SongData {

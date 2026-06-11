@@ -1,6 +1,6 @@
 //go:build windows
 
-package ui
+package mediakeys
 
 // mediakeys_windows.go — system-wide media-key support via Win32 RegisterHotKey.
 //
@@ -18,10 +18,9 @@ package ui
 //     thread that's the documented way to receive hotkey messages without
 //     needing a real window.
 //   - The callbacks are dispatched directly from the message-pump goroutine.
-//     The Fyne engine API the handlers call into (eng.Play, eng.Pause,
-//     pl.Next, ...) is internally goroutine-safe; UI-side updates fan out
-//     through OnStateChange/OnPositionChange which are already wrapped in
-//     fyne.Do by the engine's callback dispatch.
+//     Callers that need a specific thread (e.g. a UI thread) must marshal in
+//     their handler (Fyne callers wrap in fyne.Do; the Wails app calls the
+//     same goroutine-safe engine/playlist methods its JS binds use).
 
 import (
 	"log"
@@ -49,10 +48,10 @@ const (
 )
 
 var (
-	user32              = syscall.NewLazyDLL("user32.dll")
-	procRegisterHotKey  = user32.NewProc("RegisterHotKey")
+	user32               = syscall.NewLazyDLL("user32.dll")
+	procRegisterHotKey   = user32.NewProc("RegisterHotKey")
 	procUnregisterHotKey = user32.NewProc("UnregisterHotKey")
-	procGetMessage      = user32.NewProc("GetMessageW")
+	procGetMessage       = user32.NewProc("GetMessageW")
 )
 
 // Win32 POINT and MSG structs — exactly the layout GetMessageW expects.
@@ -67,22 +66,21 @@ type win32Msg struct {
 	Pt      win32Point
 }
 
-// mediaKeysHandler is the contract the UI passes to startMediaKeys. Any of
-// the fields may be nil; missing handlers are simply ignored when the
-// corresponding key fires.
-type mediaKeysHandler struct {
+// Handler is the contract the caller passes to Start. Any of the fields may
+// be nil; missing handlers are simply ignored when the corresponding key fires.
+type Handler struct {
 	OnPlayPause func()
 	OnNext      func()
 	OnPrev      func()
 	OnStop      func()
 }
 
-// startMediaKeys spawns a dedicated message-pump goroutine that registers
-// the four media keys and dispatches WM_HOTKEY messages to the handler.
+// Start spawns a dedicated message-pump goroutine that registers the four
+// media keys and dispatches WM_HOTKEY messages to the handler.
 // Errors are logged but never fatal — if hotkey registration fails (e.g.
 // another app already grabbed the key), the player still works, just
 // without that particular key.
-func startMediaKeys(h mediaKeysHandler) {
+func Start(h Handler) {
 	go func() {
 		// RegisterHotKey + GetMessage are thread-bound. Pinning the goroutine
 		// to a single OS thread is mandatory: messages registered on one
@@ -132,10 +130,10 @@ func startMediaKeys(h mediaKeysHandler) {
 
 func registerHotKey(id, vk uint32) {
 	ret, _, err := procRegisterHotKey.Call(
-		0,                  // hWnd (null = post to thread queue)
-		uintptr(id),        // identifier
+		0,                    // hWnd (null = post to thread queue)
+		uintptr(id),          // identifier
 		uintptr(modNoRepeat), // modifiers — no repeat means a held key fires once
-		uintptr(vk),        // virtual key
+		uintptr(vk),          // virtual key
 	)
 	if ret == 0 {
 		log.Printf("media keys: RegisterHotKey(VK=0x%02X) failed: %v", vk, err)

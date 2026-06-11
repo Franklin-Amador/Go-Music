@@ -119,6 +119,9 @@
 
       {#if s.lyrics.length > 0 && s.npLyricsVisible}
         <div class="np-lyrics">
+          {#if !d.lyricsSynced}
+            <div class="np-unsynced">Unsynced</div>
+          {/if}
           <LyricLines big={true} />
         </div>
       {/if}
@@ -211,6 +214,12 @@
     mask-image: linear-gradient(transparent, black 10%, black 90%, transparent);
     -webkit-mask-image: linear-gradient(transparent, black 10%, black 90%, transparent)
   }
+  /* Discreet "plain lyrics" hint at the top of the immersive lyrics column */
+  .np-unsynced {
+    text-align: center; margin-bottom: 0.8rem;
+    font-size: 0.58rem; font-weight: 700; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--muted); opacity: 0.7
+  }
   /* Without lyrics the main column simply centers; with lyrics it sits left. */
   .now-playing:not(.np-has-lyrics) .np-stage { flex-direction: column }
 
@@ -220,7 +229,9 @@
     gap: 0.7rem; width: 100%; margin-top: 0.7rem
   }
   .np-secondary { display: flex; gap: 0.5rem; justify-content: center }
-  .np-secondary .tog { padding: 0.4rem 0.55rem }   /* icon-only, square-ish */
+  .np-secondary .tog {   /* icon-only: true 32px squares, icon centered */
+    width: 32px; height: 32px; padding: 0; justify-content: center
+  }
   .np-volume { max-width: 300px; margin: 0 auto }
 
   /* "Up next" floating card */
@@ -237,7 +248,7 @@
   .np-upnext svg   { color: var(--accent); flex-shrink: 0 }
   .np-upnext-text  { display: flex; flex-direction: column; min-width: 0 }
   .np-upnext-label {
-    font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.09em;
+    font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.07em;
     color: var(--muted); font-weight: 700
   }
   .np-upnext-title {

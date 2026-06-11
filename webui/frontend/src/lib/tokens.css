@@ -214,18 +214,41 @@ button svg, button svg * { pointer-events: none }
 .settings-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 0.7rem 1.1rem; border-bottom: 1px solid var(--border);
-  font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em;
+  font-size: 0.65rem; font-weight: 700; letter-spacing: 0.07em;
   text-transform: uppercase; color: var(--muted)
 }
 .set-row {
   display: flex; flex-direction: column; gap: 0.55rem;
   padding: 0.85rem 1.1rem
 }
+/* hairline between stacked settings rows (first row sits under the header,
+   which already draws its own border) */
+.set-row + .set-row { border-top: 1px solid var(--border) }
+
+/* ── accessibility: keyboard focus ─────────────────────────────────────── */
+/* Visible focus ring for keyboard navigation only (:focus-visible — mouse
+   clicks stay clean). Inset so it never widens row layout, accent-tinted so
+   it reads as part of the dark theme rather than the UA default ring. */
+.pl-item:focus-visible,
+.song-item:focus-visible,
+.artist-item:focus-visible,
+.named-name:focus-visible,
+.named-track:focus-visible,
+.add-row:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent-50);
+  outline-offset: -2px;
+}
+/* Row glyph buttons are invisible until their row is hovered; make sure a
+   keyboard-focused one is visible too, not just outlined empty space. */
+.pl-remove:focus-visible, .named-track-rm:focus-visible,
+.row-add:focus-visible { color: var(--muted) }
 
 /* ── accessibility: honour reduced-motion ──────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;     /* staggered entrances finish instantly */
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;

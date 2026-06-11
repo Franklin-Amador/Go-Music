@@ -1,6 +1,6 @@
 <script lang="ts">
   import { s } from './stores.svelte'
-  import { addToList, addToNewList } from './player'
+  import { addToList, addToNewList, rowKey } from './player'
 </script>
 
 <!-- ════ ADD TO PLAYLIST MENU ════════════════════════════════════════ -->
@@ -17,9 +17,10 @@
       {#if s.playlists.length > 0}
         <ul class="add-list">
           {#each s.playlists as pl (pl.name)}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-            <li class="add-row" onclick={() => addToList(pl.name)}>
+            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+            <li class="add-row" role="button" tabindex="0"
+                onclick={() => addToList(pl.name)}
+                onkeydown={rowKey(() => addToList(pl.name))}>
               <span class="add-row-name">{pl.name}</span>
               <span class="add-row-count">{pl.count}</span>
             </li>

@@ -6,7 +6,17 @@
     onQueueDragStart, onQueueDragOver, onQueueDrop, onQueueDragEnd,
     openList, playList, queueList, deleteList, createList, removeFromList,
     openAddMenu, loadAlbum, playSongs, filterByArtist, clearArtistFilter,
+    rowKey, fmtTotal,
   } from './player'
+
+  // Queue total duration — only tracks whose duration the backend has learned
+  // (engine loads feed the cache; unknown tracks report 0). When some are
+  // still unknown the total is a lower bound, shown with a "≥" prefix.
+  const queueDur = $derived.by(() => {
+    let total = 0, known = 0
+    for (const t of s.playlist) if (t.duration > 0) { total += t.duration; known++ }
+    return { total, known, partial: known < s.playlist.length }
+  })
 </script>
 
 <!-- ════ LEFT SIDEBAR ════════════════════════════════════════════════════ -->
@@ -31,7 +41,10 @@
         </div>
       {:else}
         <div class="queue-head">
-          <span class="queue-count">{s.playlist.length} {s.playlist.length === 1 ? 'track' : 'tracks'}</span>
+          <!-- The separator is an explicit {' · '} expression: plain text here
+               sits at the {#if} block boundary and Svelte trims the leading
+               space, rendering "87 tracks· 3:36". -->
+          <span class="queue-count">{s.playlist.length} {s.playlist.length === 1 ? 'track' : 'tracks'}{#if queueDur.known > 0}{' · '}{queueDur.partial ? '≥ ' : ''}{fmtTotal(queueDur.total)}{/if}</span>
         </div>
         {#if s.playlist.length > 6}
           <div class="search-wrap">
@@ -40,25 +53,26 @@
         {/if}
         <ul class="pl-list">
           {#each d.filteredPlaylist as t (t.index)}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
             <li class="pl-item"
                 class:pl-current={t.current}
                 class:pl-dragging={s.dragIndex === t.index}
                 class:pl-dragover={s.dragOverIndex === t.index && s.dragIndex !== t.index}
+                role="button" tabindex="0"
                 draggable={!s.queueSearch}
                 ondragstart={(e) => onQueueDragStart(e, t.index)}
                 ondragover={(e) => onQueueDragOver(e, t.index)}
                 ondrop={(e) => onQueueDrop(e, t.index)}
                 ondragend={onQueueDragEnd}
-                onclick={() => playAt(t.index)}>
+                onclick={() => playAt(t.index)}
+                onkeydown={rowKey(() => playAt(t.index))}>
               <span class="pl-num">{t.current ? '▶' : t.index+1}</span>
               <span class="pl-title">{t.title}</span>
               <button class="row-add pl-add" title="Add to playlist"
                       onclick={(e) => { e.stopPropagation(); openAddMenu(t.path, t.title) }}>+</button>
-              <span class="pl-remove"
-                    onclick={(e) => { e.stopPropagation(); Backend.Remove(t.index) }}
-                    title="Remove">✕</span>
+              <button class="pl-remove"
+                      onclick={(e) => { e.stopPropagation(); Backend.Remove(t.index) }}
+                      title="Remove">✕</button>
             </li>
           {/each}
           {#if d.filteredPlaylist.length === 0}
@@ -91,9 +105,9 @@
           {#each s.playlists as pl (pl.name)}
             <li class="named-item" class:named-open={s.openListName === pl.name}>
               <div class="named-row">
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                <span class="named-name" onclick={() => openList(pl.name)}>
+                <span class="named-name" role="button" tabindex="0"
+                      onclick={() => openList(pl.name)}
+                      onkeydown={rowKey(() => openList(pl.name))}>
                   <span class="named-chevron">{s.openListName === pl.name ? '▾' : '▸'}</span>
                   <span class="named-title">{pl.name}</span>
                   <span class="named-count">{pl.count}</span>
@@ -107,13 +121,14 @@
               {#if s.openListName === pl.name}
                 <ul class="named-tracks">
                   {#each s.openListTracks as t, i (t.path)}
-                    <!-- svelte-ignore a11y_click_events_have_key_events -->
-                    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                    <li class="named-track" onclick={() => playSongs(s.openListTracks.map(x => x.path), i)}>
+                    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+                    <li class="named-track" role="button" tabindex="0"
+                        onclick={() => playSongs(s.openListTracks.map(x => x.path), i)}
+                        onkeydown={rowKey(() => playSongs(s.openListTracks.map(x => x.path), i))}>
                       <span class="named-track-title">{t.title}</span>
-                      <span class="named-track-rm"
-                            onclick={(e) => { e.stopPropagation(); removeFromList(pl.name, t.path) }}
-                            title="Remove">✕</span>
+                      <button class="named-track-rm"
+                              onclick={(e) => { e.stopPropagation(); removeFromList(pl.name, t.path) }}
+                              title="Remove">✕</button>
                     </li>
                   {/each}
                   {#if s.openListTracks.length === 0}
@@ -141,9 +156,10 @@
         <p class="list-count">{d.filteredSongs.length} of {s.songs.length} songs</p>
         <ul class="song-list">
           {#each d.filteredSongs as song, i}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-            <li class="song-item" onclick={() => playSongs(d.filteredSongs.map(x => x.path), i)}>
+            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+            <li class="song-item" role="button" tabindex="0"
+                onclick={() => playSongs(d.filteredSongs.map(x => x.path), i)}
+                onkeydown={rowKey(() => playSongs(d.filteredSongs.map(x => x.path), i))}>
               <div class="song-main">
                 <span class="song-title">{song.title}</span>
                 <span class="song-sub">{song.artist}{song.album ? ' · ' + song.album : ''}</span>
@@ -201,10 +217,11 @@
         <p class="list-count">{s.artists.length} artists</p>
         <ul class="artist-list">
           {#each s.artists as artist}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
             <li class="artist-item" class:artist-active={artist===s.artistFilter}
-                onclick={() => filterByArtist(artist)}>
+                role="button" tabindex="0"
+                onclick={() => filterByArtist(artist)}
+                onkeydown={rowKey(() => filterByArtist(artist))}>
               <span class="artist-name">{artist}</span>
               <span class="artist-arrow">›</span>
             </li>
@@ -259,7 +276,7 @@
   }
   .tab {
     background: none; border: none; color: var(--muted);
-    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.03em;
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.07em;
     text-transform: uppercase; padding: 0.65rem 0; cursor: pointer;
     border-bottom: 2px solid transparent; margin-bottom: -1px;
     transition: color .15s
@@ -269,6 +286,36 @@
 
   /* content area */
   .tab-content { flex: 1; overflow-y: auto; overflow-x: hidden }
+
+  /* entrance: subtle staggered fade-up when a list mounts (tab switch — the
+     {#if} chain remounts each list). Keyed/positional row reuse means typing
+     in a filter does NOT re-animate surviving rows. `backwards` fill keeps
+     delayed rows invisible only until their turn; the stagger is capped at
+     15 rows so long lists settle in ~0.4s. The global reduced-motion block
+     in tokens.css zeroes both duration and delay. */
+  @keyframes list-in {
+    from { opacity: 0; transform: translateY(5px) }
+    to   { opacity: 1; transform: none }
+  }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks) > li,
+  .album-grid > .album-card {
+    animation: list-in .16s ease-out backwards;
+  }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(2)  { animation-delay: 14ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(3)  { animation-delay: 28ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(4)  { animation-delay: 42ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(5)  { animation-delay: 56ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(6)  { animation-delay: 70ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(7)  { animation-delay: 84ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(8)  { animation-delay: 98ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(9)  { animation-delay: 112ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(10) { animation-delay: 126ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(11) { animation-delay: 140ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(12) { animation-delay: 154ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(13) { animation-delay: 168ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(14) { animation-delay: 182ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(15) { animation-delay: 196ms }
+  :is(.pl-list, .song-list, .artist-list, .named-list, .named-tracks, .album-grid) > :nth-child(n+16) { animation-delay: 210ms }
 
   /* empty state */
   .empty-state {
@@ -287,15 +334,18 @@
     display: grid; grid-template-columns: 1.8rem 1fr 1.1rem 1.1rem;
     align-items: center; gap: 0.25rem;
     padding: 0.42rem 0.6rem; cursor: pointer;
-    transition: background .1s; border-left: 2px solid transparent
+    transition: background .1s, border-color .1s; border-left: 2px solid transparent
   }
-  .pl-item:hover          { background: var(--sf2) }
+  .pl-item:hover          { background: var(--sf2); border-left-color: var(--accent) }
   .pl-item.pl-current     { background: var(--accent-08); border-left-color: var(--accent) }
   .pl-num  { font-size: 0.62rem; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums }
   .pl-current .pl-num   { color: var(--accent); font-weight: 700 }
   .pl-title { font-size: 0.77rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
   .pl-current .pl-title { color: var(--accent) }
-  .pl-remove { font-size: 0.58rem; color: transparent; cursor: pointer; text-align: center; transition: color .1s }
+  .pl-remove {
+    background: none; border: none; padding: 0;  /* real <button> now — keep the bare-glyph look */
+    font-size: 0.58rem; color: transparent; cursor: pointer; text-align: center; transition: color .1s
+  }
   .pl-item:hover .pl-remove { color: var(--muted2) }
   .pl-remove:hover          { color: #f08080 !important }
 
@@ -304,7 +354,7 @@
     display: flex; align-items: center; justify-content: space-between;
     padding: 0.5rem 0.75rem 0.35rem
   }
-  .queue-count { font-size: 0.65rem; color: var(--muted); font-weight: 600; letter-spacing: 0.03em }
+  .queue-count { font-size: 0.65rem; color: var(--muted); font-weight: 600; letter-spacing: 0.07em }
   .pl-item[draggable="true"] { cursor: grab }
   .pl-item.pl-dragging  { opacity: 0.4 }
   .pl-item.pl-dragover  { box-shadow: inset 0 2px 0 var(--accent); background: var(--accent-08) }
@@ -353,11 +403,16 @@
   .named-track {
     display: flex; align-items: center; justify-content: space-between;
     padding: 0.3rem 0.6rem 0.3rem 1.6rem; cursor: pointer;
-    transition: background .1s
+    border-left: 2px solid transparent;
+    transition: background .1s, border-color .1s
   }
-  .named-track:hover { background: var(--sf2) }
+  .named-track:hover { background: var(--sf2); border-left-color: var(--accent) }
   .named-track-title { font-size: 0.74rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-  .named-track-rm { font-size: 0.58rem; color: transparent; cursor: pointer; margin-left: 0.4rem; flex-shrink: 0 }
+  .named-track-rm {
+    background: none; border: none; padding: 0;  /* real <button> now — keep the bare-glyph look */
+    font-size: 0.58rem; color: transparent; cursor: pointer; margin-left: 0.4rem; flex-shrink: 0;
+    transition: color .1s
+  }
   .named-track:hover .named-track-rm { color: var(--muted2) }
   .named-track-rm:hover { color: #f08080 !important }
 
@@ -368,7 +423,7 @@
   .song-item {
     display: flex; align-items: center; justify-content: space-between;
     padding: 0.45rem 0.7rem; cursor: pointer; border-left: 2px solid transparent;
-    transition: background .1s
+    transition: background .1s, border-color .1s
   }
   .song-item:hover { background: var(--sf2); border-left-color: var(--accent) }
   .song-main  { flex: 1; min-width: 0 }
@@ -384,10 +439,12 @@
     border-bottom: 1px solid var(--border)
   }
   .filter-lbl   { flex: 1; font-size: 0.72rem; color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-  .filter-clear { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.7rem; padding: 2px 4px }
+  .filter-clear { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.7rem; padding: 2px 4px; transition: color .12s }
   .filter-clear:hover { color: #f08080 }
 
-  .album-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; padding: 6px }
+  /* Responsive: 90px min keeps 2 columns even at the 200px sidebar floor,
+     gives 3 at the 300px cap, and scales with any future wider sidebar. */
+  .album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 5px; padding: 6px }
   .album-card {
     background: var(--sf2); border-radius: var(--r); overflow: hidden;
     cursor: pointer; transition: transform .18s, box-shadow .18s;
@@ -413,9 +470,9 @@
   .artist-item {
     display: flex; align-items: center; justify-content: space-between;
     padding: 0.52rem 0.75rem; cursor: pointer; border-left: 2px solid transparent;
-    transition: background .1s; border-bottom: 1px solid var(--border)
+    transition: background .1s, border-color .1s; border-bottom: 1px solid var(--border)
   }
-  .artist-item:hover       { background: var(--sf2) }
+  .artist-item:hover       { background: var(--sf2); border-left-color: var(--accent) }
   .artist-item.artist-active { background: var(--accent-08); border-left-color: var(--accent) }
   .artist-name  { font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
   .artist-arrow { font-size: 1rem; color: var(--muted2) }

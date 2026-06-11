@@ -239,3 +239,22 @@ export function fmtTime(sec:number) {
   if (!sec||sec<0) return '0:00'
   return `${Math.floor(sec/60)}:${Math.floor(sec%60).toString().padStart(2,'0')}`
 }
+
+// Long-form duration for queue totals: h:mm:ss above an hour, m:ss below.
+export function fmtTotal(sec:number) {
+  sec = Math.round(sec)
+  if (sec < 3600) return fmtTime(sec)
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s2 = sec%60
+  return `${h}:${m.toString().padStart(2,'0')}:${s2.toString().padStart(2,'0')}`
+}
+
+// ── keyboard accessibility ───────────────────────────────────────────────────
+// Shared keydown factory for clickable rows (role="button" + tabindex="0"):
+// Enter/Space activate the row's click action. Space calls preventDefault so
+// the list doesn't scroll (and the global Space→play/pause shortcut already
+// skips role="button" targets).
+export function rowKey(fn: () => void) {
+  return (e: KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn() }
+  }
+}

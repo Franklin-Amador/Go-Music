@@ -23,6 +23,7 @@ import (
 
 	"gomusic/audio"
 	"gomusic/library"
+	"gomusic/mediakeys"
 	"gomusic/playlist"
 )
 
@@ -99,7 +100,7 @@ func Run() {
 	// dedicated message-pump thread; we route them through fyne.Do so the
 	// UI handlers always run on the Fyne goroutine like every other
 	// shortcut path.
-	startMediaKeys(mediaKeysHandler{
+	mediakeys.Start(mediakeys.Handler{
 		OnPlayPause: func() { fyne.Do(ui.togglePlay) },
 		OnNext:      func() { fyne.Do(ui.goNext) },
 		OnPrev:      func() { fyne.Do(ui.goPrev) },
@@ -128,36 +129,36 @@ func Run() {
 // ── UI state ─────────────────────────────────────────────────────────────────
 
 type mainUI struct {
-	win        fyne.Window
-	cfg        *appConfig
-	root       fyne.CanvasObject
-	titleText  *canvas.Text
-	artistText *canvas.Text
-	albumText  *canvas.Text
-	formatText *canvas.Text
-	posLabel   *canvas.Text
-	durLabel   *canvas.Text
-	modeLabel  *canvas.Text
-	progress   *widget.Slider
-	playBtn    *widget.Button
-	listWidget *widget.List
-	artBg       *canvas.Rectangle
-	artImage    *canvas.Image
-	artGlyph    *canvas.Text
-	bgGradient  *canvas.LinearGradient // album-derived ambient backdrop for the right column
-	currentAccent color.NRGBA          // dominant color of the current track (zero when not set)
-	eng         *audio.Engine
-	pl          *playlist.Playlist
-	seeking     bool
-	updatingUI  bool
+	win           fyne.Window
+	cfg           *appConfig
+	root          fyne.CanvasObject
+	titleText     *canvas.Text
+	artistText    *canvas.Text
+	albumText     *canvas.Text
+	formatText    *canvas.Text
+	posLabel      *canvas.Text
+	durLabel      *canvas.Text
+	modeLabel     *canvas.Text
+	progress      *widget.Slider
+	playBtn       *widget.Button
+	listWidget    *widget.List
+	artBg         *canvas.Rectangle
+	artImage      *canvas.Image
+	artGlyph      *canvas.Text
+	bgGradient    *canvas.LinearGradient // album-derived ambient backdrop for the right column
+	currentAccent color.NRGBA            // dominant color of the current track (zero when not set)
+	eng           *audio.Engine
+	pl            *playlist.Playlist
+	seeking       bool
+	updatingUI    bool
 	// suppressSelect guards programmatic listWidget.Select() calls from
 	// triggering OnSelected — which would re-enter loadAndPlay and loop.
 	suppressSelect bool
-	shuffleBtn  *widget.Button
-	shuffleDot  *canvas.Circle
-	repeatTrack bool // when true, OnFinished restarts the same track instead of advancing
-	repeatBtn   *widget.Button
-	repeatDot   *canvas.Circle
+	shuffleBtn     *widget.Button
+	shuffleDot     *canvas.Circle
+	repeatTrack    bool // when true, OnFinished restarts the same track instead of advancing
+	repeatBtn      *widget.Button
+	repeatDot      *canvas.Circle
 
 	// Lyrics panel state
 	mainSplit      *container.Split // root horizontal split (playlist | rest)
@@ -170,7 +171,7 @@ type mainUI struct {
 	lyricsLines    []audio.LyricLine
 	currentLyric   int
 	showLyrics     bool
-	lyricsToken    int              // increments per Load — async fetches check before applying
+	lyricsToken    int               // increments per Load — async fetches check before applying
 	lineAnims      []*fyne.Animation // in-flight color/size animations on lyric lines
 	scrollAnim     *fyne.Animation   // in-flight smooth-scroll animation
 
@@ -200,7 +201,7 @@ type mainUI struct {
 	libTabs        *container.AppTabs
 	albumList      *widget.List
 	artistList     *widget.List
-	songList       *widget.List    // flat all-tracks list in Songs tab
+	songList       *widget.List     // flat all-tracks list in Songs tab
 	allTracks      []*library.Track // source slice for songList
 	libStatus      *canvas.Text     // text shown on Albums tab when empty / scanning
 	libClearFilter *widget.Button   // "× clear" — visible only when artistFilter != ""
@@ -454,8 +455,8 @@ func buildUI(w fyne.Window, eng *audio.Engine, pl *playlist.Playlist, cfg *appCo
 	// transparent (no album loaded yet) so the base theme background shows
 	// through; applyMetadata fills it in once the cover is decoded.
 	ui.bgGradient = canvas.NewVerticalGradient(
-		color.NRGBA{},      // top — set per-track
-		color.NRGBA{},      // bottom — set per-track (transparent fades to base bg)
+		color.NRGBA{}, // top — set per-track
+		color.NRGBA{}, // bottom — set per-track (transparent fades to base bg)
 	)
 
 	rightColumn := container.NewStack(
@@ -1636,12 +1637,12 @@ func (ui *mainUI) setLyrics(lines []audio.LyricLine) {
 // take a middle size (lyricSizeNear) so the transition between idle and
 // active doesn't feel like a hard step.
 const (
-	lyricSizeIdle      float32 = 14
-	lyricSizeNear      float32 = 16
-	lyricSizeActive    float32 = 22
-	lyricAnimDur               = 200 * time.Millisecond
-	lyricScrollDur             = 420 * time.Millisecond
-	lyricLineHeightHint        = float32(32)
+	lyricSizeIdle       float32 = 14
+	lyricSizeNear       float32 = 16
+	lyricSizeActive     float32 = 22
+	lyricAnimDur                = 200 * time.Millisecond
+	lyricScrollDur              = 420 * time.Millisecond
+	lyricLineHeightHint         = float32(32)
 )
 
 // updateLyricsPosition highlights the line whose timestamp matches the current

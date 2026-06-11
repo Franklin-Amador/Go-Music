@@ -80,6 +80,10 @@
       s.selectedDevice = cfg.outputDevice ?? ''
       // Engine already applied these in startup(); just sync the UI toggles.
     })
+    // startup() restored the queue into the backend playlist but emits no
+    // playlist-updated (the frontend isn't listening yet at that point) —
+    // pull the snapshot once so the Queue tab isn't empty until playback.
+    Backend.GetPlaylist().then(pl => { if (pl?.length) s.playlist = pl })
     refreshLists()
   })
 
@@ -93,8 +97,15 @@
   // ── Keyboard shortcuts ────────────────────────────────────────────────────────
   $effect(() => {
     function onKey(e: KeyboardEvent) {
+      const target = e.target as HTMLElement
       // Ignore when typing in an input
-      if ((e.target as HTMLElement).tagName === 'INPUT') return
+      if (target.tagName === 'INPUT') return
+      // When a button-like element has focus, Space/Enter activate THAT
+      // control (real <button>s natively, focusable rows via their rowKey
+      // handler) — the global play/pause shortcut must not double-fire.
+      // Other shortcuts (arrows, S/R/L…) keep working with a button focused.
+      if ((e.code === 'Space' || e.code === 'Enter') &&
+          (target.tagName === 'BUTTON' || target.getAttribute('role') === 'button')) return
 
       switch (e.code) {
         case 'Space':
