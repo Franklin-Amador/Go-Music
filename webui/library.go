@@ -55,10 +55,14 @@ func (a *App) emitLibrary() {
 	if lib == nil {
 		return
 	}
+	albums := toAlbumDataSlice(lib.Albums)
 	runtime.EventsEmit(a.ctx, "library-updated", map[string]interface{}{
-		"albums":  toAlbumDataSlice(lib.Albums),
+		"albums":  albums,
 		"artists": artistNames(lib.Artists),
 	})
+	// Resolve covers for albums with no embedded art (online, cached on disk);
+	// each hit arrives as an "album-art-found" event.
+	a.sweepMissingAlbumArt(albums)
 }
 
 // ScanLibrary scans root in a background goroutine, emitting progress events.

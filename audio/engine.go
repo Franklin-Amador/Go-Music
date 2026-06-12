@@ -123,6 +123,13 @@ type Engine struct {
 	pcmPos         atomic.Int64 // frame position at output rate
 	pcmFrames      int64        // total frames at output rate (full target size)
 	pcmFramesReady atomic.Int64 // frames currently decoded + resampled into pcmData
+	// pcmFinalFrames is -1 while the streaming decoder is running and is set to
+	// the TRUE final frame count when it exits. Normally that equals pcmFrames,
+	// but a mid-file decode error (corrupt tail, truncated download) ends the
+	// decode short of the header estimate — without this marker the reader
+	// would silence-pad forever at the frozen high-water mark instead of
+	// returning io.EOF, hanging playback at the end of the song.
+	pcmFinalFrames atomic.Int64
 
 	// pcmStopCh is closed by stopInternal to signal the background streaming
 	// decoder to exit. Separate from the playback stopCh because a paused
@@ -780,6 +787,7 @@ func (e *Engine) loadPCMStreaming(path string, src pcmStreamSource) (*FileInfo, 
 	e.pcmFrames = totalOutFrames
 	e.pcmPos.Store(0)
 	e.pcmFramesReady.Store(0)
+	e.pcmFinalFrames.Store(-1) // unknown until the decoder exits
 
 	dur := float64(totalOutFrames) / float64(outputSampleRate)
 	ext := strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), "."))
@@ -836,6 +844,7 @@ func (e *Engine) loadPCMStreaming(path string, src pcmStreamSource) (*FileInfo, 
 	// If the file was shorter than the prelude, we're already done.
 	if e.pcmFramesReady.Load() >= e.pcmFrames {
 		src.Close()
+		e.pcmFinalFrames.Store(e.pcmFrames)
 		log.Printf("Loaded PCM (streamed, full): %s | %dkHz/%dbit | %dch | %.1fs",
 			filepath.Base(path), srcRate/1000, bd, srcCh, dur)
 		return info, nil
@@ -861,18 +870,35 @@ func (e *Engine) loadPCMStreaming(path string, src pcmStreamSource) (*FileInfo, 
 		for {
 			select {
 			case <-stopCh:
+				// Superseded by a new Load — do NOT publish a final frame
+				// count; the new load already reset pcmFinalFrames and a
+				// stale store here would make the new track EOF early.
 				return
 			default:
 			}
 			err := e.pcmStreamFill(src, sr, dc, srcCh, chunkSrcFrames, stopCh)
 			if err == io.EOF {
+				// Clean end: pcmStreamFill snapped ready to pcmFrames.
+				e.pcmFinalFrames.Store(e.pcmFrames)
 				return
 			}
 			if err != nil {
+				// Decode died mid-file (corrupt tail, truncated download).
+				// Publish the truncated final count so the reader EOFs at the
+				// true end of decoded audio instead of silence-padding forever
+				// — that hang froze playback at the end of affected songs.
+				// Guard against a supersede racing in: a stale truncated
+				// store would make the NEXT track end early.
 				log.Printf("PCM streaming decode error: %v", err)
+				select {
+				case <-stopCh:
+				default:
+					e.pcmFinalFrames.Store(e.pcmFramesReady.Load())
+				}
 				return
 			}
 			if e.pcmFramesReady.Load() >= e.pcmFrames {
+				e.pcmFinalFrames.Store(e.pcmFrames)
 				return
 			}
 		}
@@ -959,6 +985,7 @@ func (e *Engine) loadPCMBatch(path string) (*FileInfo, error) {
 	e.pcmFrames = int64(len(data)) / int64(outputChannels)
 	e.pcmPos.Store(0)
 	e.pcmFramesReady.Store(e.pcmFrames) // batch path is "fully ready" from the start
+	e.pcmFinalFrames.Store(e.pcmFrames)
 
 	dur := float64(e.pcmFrames) / float64(outputSampleRate)
 	ext := strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), "."))
@@ -1402,6 +1429,13 @@ func (r *pcmReader) Read(p []byte) (int, error) {
 		ready := e.pcmFramesReady.Load()
 		readyRemaining := ready - pos
 		if readyRemaining <= 0 {
+			// The decoder finished SHORT of the header estimate (decode error
+			// near the tail) and playback has consumed everything it actually
+			// produced: that's the real end of the song. Without this, the
+			// silence pad below repeats forever and the track never finishes.
+			if final := e.pcmFinalFrames.Load(); final >= 0 && pos >= final && !outActive {
+				return 0, io.EOF
+			}
 			// Decoder hasn't caught up yet (typically only happens after
 			// a seek into a far-future position). Brief silence pad.
 			pad := bytesPerFrame * 16

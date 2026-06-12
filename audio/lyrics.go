@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -109,13 +110,19 @@ func tryLRCFile(audioPath string) []LyricLine {
 // ── Source 3: online providers (LRCLIB → NetEase) ───────────────────────────
 
 // fetchOnline orchestrates the online lookup chain with a single cache entry
-// per track (negative results cached as "" so we don't re-query):
+// per track (negative results cached as "" so we don't re-query). The chain
+// is SYNCED-FIRST in two phases:
 //
-//  1. LRCLIB with the exact tag artist/title.
-//  2. LRCLIB again with a sanitized artist/title — "(2014 Remaster)" suffixes,
-//     "feat. X" credits etc. stripped — only when sanitization changed something.
-//  3. NetEase Cloud Music, same exact-then-sanitized order. No API key; serves
-//     real synced LRC for a huge catalog including Western music.
+//	Phase 1 (synced only): LRCLIB exact → LRCLIB sanitized — "(2014 Remaster)"
+//	suffixes, "feat. X" credits etc. stripped, only when sanitization changed
+//	something — → NetEase exact → NetEase sanitized. The first source that
+//	yields TIMESTAMPED lyrics wins. A plain-only hit from an earlier source
+//	must NOT short-circuit a later source that has the synced version (real
+//	case: LRCLIB had plain romaji for a cover, NetEase had the synced LRC).
+//
+//	Phase 2 (plain fallback): only when NO source produced synced lyrics, use
+//	the best plain text remembered from phase 1 (first source order — no
+//	re-querying).
 //
 // Duration tolerance applies on every pass so a wrong release (remaster,
 // live, single edit) never wins just because the name matched.
@@ -128,19 +135,67 @@ func fetchOnline(artist, title, album string, durationSec float64) string {
 	sanArtist, sanTitle := sanitizeForSearch(artist, title)
 	sanitized := sanArtist != artist || sanTitle != title
 
-	text := lrclibLookup(artist, title, album, durationSec)
-	if text == "" && sanitized {
-		text = lrclibLookup(sanArtist, sanTitle, album, durationSec)
-	}
-	if text == "" {
-		text = neteaseFetch(artist, title, durationSec)
-	}
-	if text == "" && sanitized {
-		text = neteaseFetch(sanArtist, sanTitle, durationSec)
+	// Phase 1: hunt for synced lyrics across every provider, remembering the
+	// first plain candidate encountered along the way for phase 2. Any
+	// transient failure (network, rate-limit, 5xx) taints the whole pass:
+	// a miss then proves nothing, so it must not become a cached negative.
+	var plain string
+	var transient bool
+	keepPlain := func(p string) {
+		if plain == "" {
+			plain = p
+		}
 	}
 
-	lyricsCachePut(key, text) // "" caches the negative result
+	synced, p, t := lrclibLookup(artist, title, album, durationSec)
+	keepPlain(p)
+	transient = transient || t
+	if synced == "" && sanitized {
+		synced, p, t = lrclibLookup(sanArtist, sanTitle, album, durationSec)
+		keepPlain(p)
+		transient = transient || t
+	}
+	if synced == "" {
+		var raw string
+		raw, t = neteaseFetch(artist, title, durationSec)
+		synced, p = splitSyncedPlain(raw)
+		keepPlain(p)
+		transient = transient || t
+	}
+	if synced == "" && sanitized {
+		var raw string
+		raw, t = neteaseFetch(sanArtist, sanTitle, durationSec)
+		synced, p = splitSyncedPlain(raw)
+		keepPlain(p)
+		transient = transient || t
+	}
+
+	// Phase 2: no synced anywhere — fall back to the best plain text seen.
+	text := synced
+	if text == "" {
+		text = plain
+	}
+
+	// Cache the result — except an empty one tainted by a transient failure:
+	// the next playback simply retries. Definitive negatives DO cache, but
+	// they expire (see lyricsCacheGet) so newly-uploaded lyrics get found.
+	if text != "" || !transient {
+		lyricsCachePut(key, text)
+	}
 	return text
+}
+
+// splitSyncedPlain classifies a raw lyrics text into the (synced, plain)
+// channels used by the fetchOnline chain. NetEase's lrc.lyric is normally
+// timestamped, but never assume — untimed text is a plain candidate only.
+func splitSyncedPlain(text string) (synced, plain string) {
+	if text == "" {
+		return "", ""
+	}
+	if lrcTimeRe.MatchString(text) {
+		return text, ""
+	}
+	return "", text
 }
 
 // sanitizeForSearch strips noise that breaks online matching: trailing
@@ -191,50 +246,54 @@ const (
 	lrclibDurationToleranceSec = 2.5
 )
 
-// lrclibLookup returns the best synced (or plain, as a last resort) lyrics
-// for a track. Strategy:
+// lrclibLookup returns the best synced and best plain lyrics for a track as
+// SEPARATE channels — the fetchOnline chain must be able to keep hunting for
+// a synced version elsewhere even when LRCLIB only has plain text. Strategy
+// (matching logic unchanged from the single-string version):
 //
 //  1. /api/get for exact (artist + title [+ album + duration]). If it returns
 //     a record whose duration matches ours within tolerance, use it.
 //  2. Otherwise /api/search, then pick the record with the smallest duration
 //     delta that actually carries syncedLyrics — even when /api/get returned
 //     something, because that something may have been the wrong release.
+//  3. Last resort per channel: whatever /api/get returned, even if duration
+//     mismatched (synced) or it was plain-only (plain).
 //
 // Caching is handled by the fetchOnline orchestrator, not here, so the
 // sanitized retry and the NetEase fallback all share one cache entry.
-func lrclibLookup(artist, title, album string, durationSec float64) string {
-	get := lrclibGet(artist, title, album, int(durationSec))
+func lrclibLookup(artist, title, album string, durationSec float64) (synced, plain string, transient bool) {
+	get, t1 := lrclibGet(artist, title, album, int(durationSec))
+	transient = t1
 	if get == nil && album != "" {
 		// Album name in the file tag often doesn't match LRCLIB (wrong edition,
 		// year suffix, compilation name). Retry without album for a broader match.
-		get = lrclibGet(artist, title, "", int(durationSec))
+		var t2 bool
+		get, t2 = lrclibGet(artist, title, "", int(durationSec))
+		transient = transient || t2
 	}
 
 	if get != nil && get.SyncedLyrics != "" && durationSec > 0 &&
 		math.Abs(get.Duration-durationSec) <= lrclibDurationToleranceSec {
-		return get.SyncedLyrics
+		return get.SyncedLyrics, "", transient
 	}
 
 	// Fall back to search: prefer synced, prefer closest-duration.
-	if best := lrclibSearchBest(artist, title, album, durationSec); best != "" {
-		return best
-	}
+	searchSynced, searchPlain, t3 := lrclibSearchBest(artist, title, album, durationSec)
+	transient = transient || t3
 
-	// Last resort: whatever /api/get returned, even if duration mismatched or
-	// it was plain-only. Better something on screen than nothing.
-	if get != nil {
-		switch {
-		case get.SyncedLyrics != "":
-			return get.SyncedLyrics
-		case get.PlainLyrics != "":
-			return get.PlainLyrics
-		}
+	synced = searchSynced
+	if synced == "" && get != nil {
+		// Duration-mismatched /api/get synced — same last resort as before.
+		synced = get.SyncedLyrics
 	}
-
-	return ""
+	plain = searchPlain
+	if plain == "" && get != nil {
+		plain = get.PlainLyrics
+	}
+	return synced, plain, transient
 }
 
-func lrclibGet(artist, title, album string, duration int) *lrclibResp {
+func lrclibGet(artist, title, album string, duration int) (*lrclibResp, bool) {
 	u := url.URL{Scheme: "https", Host: "lrclib.net", Path: "/api/get"}
 	q := u.Query()
 	q.Set("artist_name", artist)
@@ -247,24 +306,24 @@ func lrclibGet(artist, title, album string, duration int) *lrclibResp {
 	}
 	u.RawQuery = q.Encode()
 
-	data, ok := lrclibDoJSON(u.String(), &lrclibResp{})
+	data, ok, transient := lrclibDoJSON(u.String(), &lrclibResp{})
 	if !ok {
-		return nil
+		return nil, transient
 	}
 	r := data.(*lrclibResp)
 	if r.Instrumental {
-		return nil
+		return nil, false
 	}
-	return r
+	return r, false
 }
 
-// lrclibSearchBest queries /api/search and returns the synced lyrics of the
-// record whose duration is closest to ours. Records without syncedLyrics are
-// ignored — we already would have gotten a plain-only result from /api/get.
-// Album is intentionally omitted: tag album names often differ from LRCLIB's
+// lrclibSearchBest queries /api/search and returns, per channel, the lyrics
+// of the record whose duration is closest to ours: the closest record that
+// carries syncedLyrics, and the closest plain-only record. Album is
+// intentionally omitted: tag album names often differ from LRCLIB's
 // (different editions, punctuation, language) and would filter out valid hits.
-// If nothing has syncedLyrics, returns "".
-func lrclibSearchBest(artist, title, album string, durationSec float64) string {
+// Either channel may be "".
+func lrclibSearchBest(artist, title, album string, durationSec float64) (string, string, bool) {
 	u := url.URL{Scheme: "https", Host: "lrclib.net", Path: "/api/search"}
 	q := u.Query()
 	if title != "" {
@@ -275,13 +334,13 @@ func lrclibSearchBest(artist, title, album string, durationSec float64) string {
 	}
 	u.RawQuery = q.Encode()
 
-	data, ok := lrclibDoJSON(u.String(), &[]lrclibResp{})
+	data, ok, transient := lrclibDoJSON(u.String(), &[]lrclibResp{})
 	if !ok {
-		return ""
+		return "", "", transient
 	}
 	results := *(data.(*[]lrclibResp))
 	if len(results) == 0 {
-		return ""
+		return "", "", false
 	}
 
 	bestSynced, bestPlain := -1, -1
@@ -308,36 +367,75 @@ func lrclibSearchBest(artist, title, album string, durationSec float64) string {
 			bestPlain = i
 		}
 	}
+	syncedText, plainText := "", ""
 	if bestSynced >= 0 {
-		return results[bestSynced].SyncedLyrics
+		syncedText = results[bestSynced].SyncedLyrics
 	}
 	if bestPlain >= 0 {
-		return results[bestPlain].PlainLyrics
+		plainText = results[bestPlain].PlainLyrics
 	}
-	return ""
+	return syncedText, plainText, false
 }
 
+// ── transient-failure classification + request pacing ───────────────────────
+//
+// A "transient" failure (network down, timeout, 429 rate-limit, 5xx, or a
+// decode error from a changed API layout) means THE TRACK MIGHT EXIST — the
+// orchestrator must not write a permanent negative cache entry for it. Only a
+// definitive "the API understood us and has nothing" (404 / clean empty
+// result) may cache a negative. This distinction is the fix for whole-album
+// loads where a burst of lookups got rate-limited: some tracks succeeded,
+// the throttled ones were negative-cached forever ("found some, not others").
+func transientStatus(code int) bool {
+	return code == 429 || code == 403 || code >= 500
+}
+
+// pacer spaces requests to one provider so album-sized bursts (8 tracks ×
+// several calls each) don't trip rate limits in the first place. FetchLyrics
+// always runs on a background goroutine, so sleeping here is safe.
+type pacer struct {
+	mu   sync.Mutex
+	last time.Time
+	gap  time.Duration
+}
+
+func (p *pacer) wait() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d := p.gap - time.Since(p.last); d > 0 {
+		time.Sleep(d)
+	}
+	p.last = time.Now()
+}
+
+var (
+	lrclibPace  = &pacer{gap: 600 * time.Millisecond}
+	neteasePace = &pacer{gap: 800 * time.Millisecond}
+)
+
 // lrclibDoJSON issues a GET and decodes into out (a pointer). Returns the
-// pointer back and true on success, nil and false on any error or non-200.
-func lrclibDoJSON(rawURL string, out interface{}) (interface{}, bool) {
+// pointer back and ok on success; transient reports whether a failure was
+// retryable (network/429/5xx/decode) as opposed to a definitive not-found.
+func lrclibDoJSON(rawURL string, out interface{}) (data interface{}, ok, transient bool) {
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
 	req.Header.Set("User-Agent", lrclibUserAgent)
+	lrclibPace.wait()
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, false
+		return nil, false, true
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, false
+		return nil, false, transientStatus(resp.StatusCode)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return nil, false
+		return nil, false, true
 	}
-	return out, true
+	return out, true, false
 }
 
 // ── NetEase Cloud Music API ──────────────────────────────────────────────────
@@ -406,11 +504,11 @@ type neteaseLyricResp struct {
 }
 
 // neteaseFetch searches NetEase for the track and returns its LRC text, or ""
-// on any miss/failure.
-func neteaseFetch(artist, title string, durationSec float64) string {
-	id := neteaseSearchBest(artist, title, durationSec)
+// on any miss/failure (transient reports whether the miss was retryable).
+func neteaseFetch(artist, title string, durationSec float64) (string, bool) {
+	id, transient := neteaseSearchBest(artist, title, durationSec)
 	if id == 0 {
-		return ""
+		return "", transient
 	}
 	return neteaseLyric(id)
 }
@@ -421,10 +519,10 @@ func neteaseFetch(artist, title string, durationSec float64) string {
 // class, smallest |duration delta| wins. When our duration is known, a best
 // delta beyond the tolerance rejects the whole result — wrong-version lyrics
 // are worse than none (the "Bad" track canary philosophy).
-func neteaseSearchBest(artist, title string, durationSec float64) int64 {
+func neteaseSearchBest(artist, title string, durationSec float64) (int64, bool) {
 	query := strings.TrimSpace(artist + " " + title)
 	if query == "" {
-		return 0
+		return 0, false
 	}
 	form := url.Values{}
 	form.Set("s", query)
@@ -432,17 +530,17 @@ func neteaseSearchBest(artist, title string, durationSec float64) int64 {
 	form.Set("limit", "10")
 	req, err := http.NewRequest("POST", neteaseSearchURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return 0
+		return 0, false
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	var out neteaseSearchResp
-	if !neteaseDoJSON(req, &out) {
-		return 0
+	if ok, transient := neteaseDoJSON(req, &out); !ok {
+		return 0, transient
 	}
 	songs := out.Result.Songs
 	if len(songs) == 0 {
-		return 0
+		return 0, false
 	}
 
 	ourArtist := normalizeLoose(artist)
@@ -472,28 +570,28 @@ func neteaseSearchBest(artist, title string, durationSec float64) int64 {
 		}
 	}
 	if durationSec > 0 && bestDelta > neteaseDurationToleranceSec {
-		return 0
+		return 0, false
 	}
-	return bestID
+	return bestID, false
 }
 
 // neteaseLyric fetches the LRC text for a song id. Empty or
-// instrumental-marker responses are treated as a miss.
-func neteaseLyric(id int64) string {
+// instrumental-marker responses are treated as a (definitive) miss.
+func neteaseLyric(id int64) (string, bool) {
 	req, err := http.NewRequest("GET", fmt.Sprintf(neteaseLyricURL, id), nil)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	var out neteaseLyricResp
-	if !neteaseDoJSON(req, &out) {
-		return ""
+	if ok, transient := neteaseDoJSON(req, &out); !ok {
+		return "", transient
 	}
 	text := strings.TrimSpace(out.Lrc.Lyric)
 	// "纯音乐" ("pure music") is NetEase's instrumental placeholder.
 	if text == "" || strings.Contains(text, "纯音乐") {
-		return ""
+		return "", false
 	}
-	return stripNeteaseCredits(text)
+	return stripNeteaseCredits(text), false
 }
 
 // stripNeteaseCredits drops the timestamped credit lines NetEase prepends to
@@ -520,20 +618,25 @@ func stripNeteaseCredits(text string) string {
 }
 
 // neteaseDoJSON sends the request with the required Referer + desktop UA
-// headers and decodes the JSON body. False on any error or non-200.
-func neteaseDoJSON(req *http.Request, out interface{}) bool {
+// headers and decodes the JSON body. transient follows the same rules as
+// lrclibDoJSON — a retryable failure must not become a permanent negative.
+func neteaseDoJSON(req *http.Request, out interface{}) (ok, transient bool) {
 	req.Header.Set("Referer", neteaseReferer)
 	req.Header.Set("User-Agent", neteaseUserAgent)
+	neteasePace.wait()
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return false, true
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return false
+		return false, transientStatus(resp.StatusCode)
 	}
-	return json.NewDecoder(resp.Body).Decode(out) == nil
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return false, true
+	}
+	return true, false
 }
 
 // normalizeLoose lowercases and removes all whitespace, for forgiving
@@ -549,7 +652,18 @@ func normalizeLoose(s string) string {
 // added duration-aware /api/search fallback) so users automatically get
 // fresh, better-matched lyrics instead of the stale wrong-version cache.
 // v6: sanitized-title retry + NetEase fallback — retries old negatives.
-const lyricsCacheVersion = "v6"
+// v7: synced-first two-phase chain — tracks cached as plain retry every
+// provider for a synced version before settling for plain again.
+// v8: transient failures (rate-limit/network) no longer cache negatives, and
+// definitive negatives expire after lyricsNegativeTTL — purges the bogus
+// permanent negatives v7 wrote for tracks LRCLIB actually has (the "found
+// some album tracks but not others" report).
+const lyricsCacheVersion = "v8"
+
+// lyricsNegativeTTL bounds how long a definitive "no lyrics anywhere" result
+// is trusted. Lyrics databases grow daily (community uploads), so a not-found
+// from last week says little about today. Positive entries never expire.
+const lyricsNegativeTTL = 24 * time.Hour
 
 func lyricsCacheKey(artist, title string) string {
 	h := sha1.New()
@@ -574,9 +688,18 @@ func lyricsCacheGet(key string) (string, bool) {
 	if dir == "" {
 		return "", false
 	}
-	data, err := os.ReadFile(filepath.Join(dir, key+".txt"))
+	path := filepath.Join(dir, key+".txt")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", false
+	}
+	if len(data) == 0 {
+		// Negative entry: honour it only while fresh. An expired negative is
+		// treated as a miss so the chain re-queries (and rewrites the entry,
+		// resetting the clock, whatever the outcome).
+		if st, err := os.Stat(path); err != nil || time.Since(st.ModTime()) > lyricsNegativeTTL {
+			return "", false
+		}
 	}
 	return string(data), true
 }

@@ -46,6 +46,10 @@ export function GetLibrarySongs() {
   return window['go']['main']['App']['GetLibrarySongs']();
 }
 
+export function GetLyricOffset(arg1, arg2) {
+  return window['go']['main']['App']['GetLyricOffset'](arg1, arg2);
+}
+
 export function GetOutputDevice() {
   return window['go']['main']['App']['GetOutputDevice']();
 }
@@ -188,6 +192,10 @@ export function SetCrossfade(arg1) {
 
 export function SetExclusive(arg1) {
   return window['go']['main']['App']['SetExclusive'](arg1);
+}
+
+export function SetLyricOffset(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetLyricOffset'](arg1, arg2, arg3);
 }
 
 export function SetOutputDevice(arg1) {

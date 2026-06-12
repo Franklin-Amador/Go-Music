@@ -22,6 +22,21 @@
 }
 * { box-sizing: border-box; margin: 0; padding: 0 }
 
+/* The app is a fixed full-viewport grid (.layout, height:100vh) — the document
+   itself must NEVER scroll. Belt-and-suspenders against any code path that
+   programmatically scrolls an ancestor (e.g. scrollIntoView walks ALL
+   scrollable ancestors — even overflow:hidden ones, which stay
+   PROGRAMMATICALLY scrollable — and once shifted the document stays broken).
+   overflow:clip (second declaration, falls back to hidden) removes even that
+   programmatic scrollability; overscroll-behavior stops wheel/touch chaining
+   from the lyrics surfaces into the document. */
+html, body {
+  overflow: hidden;
+  overflow: clip;
+  height: 100%;
+  overscroll-behavior: none;
+}
+
 /* ── scrollbars: thin + discreet instead of the chunky native Windows bar ── */
 * { scrollbar-width: thin; scrollbar-color: var(--muted2) transparent }
 *::-webkit-scrollbar { width: 8px; height: 8px }

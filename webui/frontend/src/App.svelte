@@ -6,9 +6,10 @@
   import type { TrackInfo, PlaylistTrack, PlaylistMeta, LyricLine, AlbumData } from './lib/stores.svelte'
   import {
     togglePlay, next, prev, toggleShuffle, toggleRepeat,
-    refreshLists, loadDevices, handlePositionChange,
+    refreshLists, loadDevices, handlePositionChange, applyTrack,
   } from './lib/player'
   import { initViz, setVizData } from './lib/viz.svelte'
+  import { initLyricFlow, reduceMotion } from './lib/lyricflow.svelte'
   import Sidebar from './lib/Sidebar.svelte'
   import Player from './lib/Player.svelte'
   import LyricsPanel from './lib/LyricsPanel.svelte'
@@ -20,15 +21,37 @@
   // app's lifetime).
   initViz()
 
-  // ── lyric auto-scroll ────────────────────────────────────────────────────────
+  // Lyric flow engine: interpolated clock + spring scroll + karaoke sweep
+  // (inert under prefers-reduced-motion — the fallback effect below scrolls).
+  initLyricFlow()
+
+  // ── lyric auto-scroll (reduced-motion fallback only) ─────────────────────────
+  // Normally lyricflow.svelte.ts spring-scrolls the active surface. Under
+  // prefers-reduced-motion that engine is inert and LyricLines keeps the
+  // static bucket renderer, so jump (no smooth crawl) to the line here.
   // Scope the query to whichever lyric surface is on screen so the two copies
-  // (side panel + Now Playing) don't fight over scrollIntoView.
+  // (side panel + Now Playing) don't fight over the scroll position.
+  // NEVER scrollIntoView here: it scrolls EVERY scrollable ancestor — including
+  // overflow:hidden boxes like .layout, which are still programmatically
+  // scrollable — so near the end of a song (active line can't be centred) the
+  // leftover delta shoved the WHOLE UI upward. Container-scoped math instead,
+  // clamped so the surface's own scrollTop can never overshoot either.
   const activeLyricIdx = $derived(d.activeLyricIdx)
   $effect(() => {
+    if (!reduceMotion) return
     if (activeLyricIdx < 0) return
     const scope = s.showNowPlaying ? '.np-lyrics' : (s.showLyrics ? '.lyrics-list' : null)
     if (!scope) return
-    document.querySelector(`${scope} .lyric-active`)?.scrollIntoView({behavior:'smooth',block:'center'})
+    const container = document.querySelector(scope) as HTMLElement | null
+    if (!container) return
+    const el = container.querySelector('.lyric-active') as HTMLElement | null
+    if (!el) return
+    // Rect-based offset (container may not be the offsetParent).
+    const base = container.getBoundingClientRect().top - container.scrollTop
+    const r = el.getBoundingClientRect()
+    const center = r.top - base + r.height / 2
+    const target = center - container.clientHeight / 2
+    container.scrollTop = Math.max(0, Math.min(target, container.scrollHeight - container.clientHeight))
   })
 
   // ── lazy load songs when tab opens ──────────────────────────────────────────
@@ -134,7 +157,8 @@
         case 'KeyR': toggleRepeat();  break
         case 'KeyL': s.showLyrics = !s.showLyrics; break
         case 'Escape':
-          if (s.addMenuPath !== null) { s.addMenuPath = null }
+          if (s.lyricSyncMode)        { s.lyricSyncMode = false }
+          else if (s.addMenuPath !== null) { s.addMenuPath = null }
           else if (s.showSettings)    { s.showSettings = false }
           else if (s.showNowPlaying)  { s.showNowPlaying = false }
           else                        { s.songSearch = ''; s.artistFilter = '' }
@@ -158,10 +182,23 @@
       // Visualizer push (~30 fps from Go, only while playing) — replaces the
       // old per-frame GetSpectrum/GetWaveform IPC polling.
       EventsOn('viz-data', setVizData),
-      EventsOn('track-change',    (info:TrackInfo) => {
-        s.track=info; s.loading=false; s.errorMsg=''
-        s.seekPreview = null
-        s.lyrics=[]; s.lyricsFetched=false; s.lyricsRetrying=false
+      // applyTrack resets pos/dur/lyrics alongside the track — shared with the
+      // button paths (Next/Prev/PlayAt return TrackInfo without this event).
+      EventsOn('track-change', (info:TrackInfo) => applyTrack(info)),
+      // Online art lookup result (artfetch.go) — only applied if the track is
+      // still the one playing; stale results just stay in the disk cache.
+      EventsOn('art-found', (a:{path:string;artBase64:string;accentHex:string}) => {
+        if (s.track && s.track.path === a.path) {
+          s.track.artBase64 = a.artBase64
+          s.track.hasArt = true
+          s.track.accentHex = a.accentHex
+        }
+      }),
+      // Cover resolved online for a library album without embedded art —
+      // patch the matching card in the Albums grid.
+      EventsOn('album-art-found', (a:{artist:string;title:string;artBase64:string;accentHex:string}) => {
+        const al = s.albums.find(x => x.artist === a.artist && x.title === a.title)
+        if (al) { al.artBase64 = a.artBase64; al.accentHex = a.accentHex }
       }),
       EventsOn('playlist-updated',(pl:PlaylistTrack[]) => { s.playlist=pl }),
       EventsOn('playlists-updated',(p:PlaylistMeta[]) => {

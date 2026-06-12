@@ -25,6 +25,8 @@ export function GetLibraryArtists():Promise<Array<string>>;
 
 export function GetLibrarySongs():Promise<Array<main.SongData>>;
 
+export function GetLyricOffset(arg1:string,arg2:string):Promise<number>;
+
 export function GetOutputDevice():Promise<string>;
 
 export function GetOutputMode():Promise<string>;
@@ -96,6 +98,8 @@ export function SetAccentSource(arg1:string):Promise<void>;
 export function SetCrossfade(arg1:number):Promise<void>;
 
 export function SetExclusive(arg1:boolean):Promise<void>;
+
+export function SetLyricOffset(arg1:string,arg2:string,arg3:number):Promise<void>;
 
 export function SetOutputDevice(arg1:string):Promise<void>;
 

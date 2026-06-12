@@ -2,13 +2,59 @@
 // All functions mutate the shared `s` state object; reactivity flows from there.
 import * as Backend from '../../wailsjs/go/main/App.js'
 import { s, d } from './stores.svelte'
+import type { TrackInfo } from './stores.svelte'
+
+// applyTrack is the SINGLE place a new now-playing track enters the UI state.
+// It must reset the playback clock and the lyrics alongside the track itself:
+// the Next/Prev/PlayAt binds return the TrackInfo directly (they don't emit
+// track-change), so without these resets a button-skip kept the previous
+// song's position and lyrics on screen until the first position-change /
+// lyrics event arrived — the "stale lyrics when skipping with the button" bug.
+// Used by every loader below AND by the track-change event handler.
+export function applyTrack(info: TrackInfo | null) {
+  if (!info) return
+  s.track = info
+  s.loading = false
+  s.errorMsg = ''
+  s.seekPreview = null
+  s.pos = 0
+  s.dur = info.duration ?? 0
+  s.lyrics = []
+  s.lyricsFetched = false
+  s.lyricsRetrying = false
+  // Per-track lyric timing correction: reset, then restore the saved one.
+  s.lyricSyncMode = false
+  s.lyricOffset = 0
+  const path = info.path
+  Backend.GetLyricOffset(info.artist, info.title).then(o => {
+    if (s.track?.path === path && o) s.lyricOffset = o
+  })
+}
+
+// ── lyric timing calibration ─────────────────────────────────────────────────
+// The offset shifts every line: shown time = timeSec + offset. Positive =
+// lyrics appear later. Persisted per artist|title in Go, so "Bad"-style
+// provider drift is fixed once, forever.
+export function setLyricOffset(sec: number) {
+  s.lyricOffset = Math.round(sec * 100) / 100
+  if (s.track) Backend.SetLyricOffset(s.track.artist, s.track.title, s.lyricOffset)
+}
+export function nudgeLyricOffset(deltaSec: number) { setLyricOffset(s.lyricOffset + deltaSec) }
+
+// Tap-to-sync: the user clicks the line they are HEARING right now — the
+// offset that makes that line active at this instant is pos − timeSec.
+export function calibrateLyricToLine(lineTimeSec: number, nowPos: number) {
+  if (lineTimeSec < 0) return
+  setLyricOffset(nowPos - lineTimeSec)
+  s.lyricSyncMode = false
+}
 
 // ── open / scan ──────────────────────────────────────────────────────────────
 export async function openFile() {
   const path = await Backend.OpenFileDialog()
   if (!path) return
   s.errorMsg=''; s.loading=true
-  try { s.track = await Backend.LoadFile(path) }
+  try { applyTrack(await Backend.LoadFile(path)) }
   catch(e:any) { s.errorMsg=String(e); s.loading=false }
 }
 
@@ -40,21 +86,21 @@ export function togglePlay() {
 
 export async function next() {
   s.loading=true
-  try { const t=await Backend.Next(); if(t) s.track=t }
+  try { applyTrack(await Backend.Next()) }
   catch(e:any) { s.errorMsg=String(e) }
   finally { s.loading=false }
 }
 
 export async function prev() {
   s.loading=true
-  try { const t=await Backend.Prev(); if(t) s.track=t }
+  try { applyTrack(await Backend.Prev()) }
   catch(e:any) { s.errorMsg=String(e) }
   finally { s.loading=false }
 }
 
 export async function playAt(index:number) {
   s.loading=true
-  try { const t=await Backend.PlayAt(index); if(t) s.track=t }
+  try { applyTrack(await Backend.PlayAt(index)) }
   catch(e:any) { s.errorMsg=String(e) }
   finally { s.loading=false }
 }
@@ -92,7 +138,7 @@ export async function openList(name: string) {
 }
 export async function playList(name: string) {
   s.tab = 'playlist'
-  try { const t = await Backend.PlayPlaylist(name); if (t) s.track = t }
+  try { applyTrack(await Backend.PlayPlaylist(name)) }
   catch(e:any) { s.errorMsg = String(e) }
 }
 export function queueList(name: string) { Backend.QueuePlaylist(name) }
@@ -131,7 +177,7 @@ export async function addToNewList() {
 // ── library ──────────────────────────────────────────────────────────────────
 export async function loadAlbum(artist:string, title:string) {
   s.loading=true; s.tab='playlist'
-  try { const t=await Backend.LoadAlbum(artist, title); if(t) s.track=t }
+  try { applyTrack(await Backend.LoadAlbum(artist, title)) }
   catch(e:any) { s.errorMsg=String(e) }
   finally { s.loading=false }
 }
@@ -140,7 +186,7 @@ export async function loadAlbum(artist:string, title:string) {
 // The list becomes the queue so Next/Prev walk it.
 export async function playSongs(paths:string[], index:number) {
   s.loading=true; s.tab='playlist'
-  try { const t=await Backend.PlaySongs(paths, index); if(t) s.track=t }
+  try { applyTrack(await Backend.PlaySongs(paths, index)) }
   catch(e:any) { s.errorMsg=String(e) }
   finally { s.loading=false }
 }

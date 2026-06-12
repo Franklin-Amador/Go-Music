@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -133,6 +134,79 @@ func (a *App) emitArtFound(path string, b []byte) {
 		ArtBase64: "data:" + artMime(b) + ";base64," + base64.StdEncoding.EncodeToString(b),
 		AccentHex: dominantHex(b),
 	})
+}
+
+// ── library albums sweep ──────────────────────────────────────────────────────
+
+// AlbumArtFound is the payload of "album-art-found" — art resolved online for
+// a library album that has no embedded cover.
+type AlbumArtFound struct {
+	Artist    string `json:"artist"`
+	Title     string `json:"title"`
+	ArtBase64 string `json:"artBase64"`
+	AccentHex string `json:"accentHex"`
+}
+
+// albumArtSweeping prevents overlapping sweeps (startup emit + scan-done emit).
+var albumArtSweeping atomic.Bool
+
+// sweepMissingAlbumArt walks the albums that came out of the library without
+// embedded covers and resolves each through the same disk cache + provider
+// chain as the now-playing flow. Same cache key (artist|album), so a cover
+// fetched for the playing track instantly serves its album card and vice
+// versa. One goroutine, sequential — artFetchMu plus the providers' goodwill
+// are respected; misses are negative-cached so re-sweeps cost nothing.
+func (a *App) sweepMissingAlbumArt(albums []AlbumData) {
+	var missing []AlbumData
+	for _, al := range albums {
+		if al.ArtBase64 == "" && al.Artist != "" {
+			missing = append(missing, al)
+		}
+	}
+	if len(missing) == 0 || !albumArtSweeping.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer albumArtSweeping.Store(false)
+		dir := artCacheDir()
+		if dir == "" {
+			return
+		}
+		for _, al := range missing {
+			key := artCacheKey(al.Artist, al.Title, "")
+			if key == "" {
+				continue
+			}
+			jpg := filepath.Join(dir, key+".jpg")
+			miss := filepath.Join(dir, key+".miss")
+
+			b, err := os.ReadFile(jpg)
+			if err != nil || !validArt(b) {
+				if _, err := os.Stat(miss); err == nil {
+					continue // negative-cached
+				}
+				artFetchMu.Lock()
+				b = fetchOnlineArt(al.Artist, al.Title, "")
+				_ = os.MkdirAll(dir, 0o755)
+				if b == nil {
+					_ = os.WriteFile(miss, nil, 0o644)
+					artFetchMu.Unlock()
+					continue
+				}
+				_ = os.WriteFile(jpg, b, 0o644)
+				artFetchMu.Unlock()
+			}
+			if a.ctx == nil {
+				return
+			}
+			runtime.EventsEmit(a.ctx, "album-art-found", AlbumArtFound{
+				Artist:    al.Artist,
+				Title:     al.Title,
+				ArtBase64: "data:" + artMime(b) + ";base64," + base64.StdEncoding.EncodeToString(b),
+				AccentHex: dominantHex(b),
+			})
+		}
+	}()
 }
 
 // ── provider chain ────────────────────────────────────────────────────────────

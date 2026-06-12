@@ -30,6 +30,8 @@ export const s = $state({
   lyrics:        [] as LyricLine[],
   lyricsFetched: false,  // true once the first fetch has returned (empty or not)
   lyricsRetrying: false,
+  lyricOffset: 0,        // per-track timing correction (s); persisted in Go
+  lyricSyncMode: false,  // calibration: next click on a line sets the offset
   waveform:    [] as number[],
   errorMsg:    '',
   loading:     false,
@@ -112,7 +114,7 @@ export const d = {
     if (!s.lyrics.length) return -1
     let idx = -1
     for (let i = 0; i < s.lyrics.length; i++) {
-      if (s.lyrics[i].timeSec >= 0 && s.lyrics[i].timeSec <= s.pos) idx = i
+      if (s.lyrics[i].timeSec >= 0 && s.lyrics[i].timeSec + s.lyricOffset <= s.pos) idx = i
     }
     return idx
   },

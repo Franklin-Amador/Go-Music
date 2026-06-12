@@ -1,7 +1,11 @@
 <script lang="ts">
   import { s, d } from './stores.svelte'
-  import { retryLyrics } from './player'
+  import { retryLyrics, nudgeLyricOffset, setLyricOffset } from './player'
   import LyricLines from './LyricLines.svelte'
+
+  const offsetLabel = $derived(
+    s.lyricOffset === 0 ? '0' : (s.lyricOffset > 0 ? '+' : '') + s.lyricOffset.toFixed(2).replace(/\.?0+$/, '') + 's'
+  )
 </script>
 
 <!-- ════ RIGHT LYRICS PANEL ══════════════════════════════════════════ -->
@@ -13,11 +17,26 @@
         {#if s.lyrics.length > 0 && !d.lyricsSynced}
           <span class="unsynced-badge" title="Plain lyrics — no line timing available">Unsynced</span>
         {/if}
+        {#if s.lyrics.length > 0 && d.lyricsSynced}
+          <span class="sync-ctl" title="Lyric timing — nudge, or use ◎ and click the line you hear">
+            <button class="sync-btn" onclick={() => nudgeLyricOffset(-0.25)} title="Lyrics 0.25s earlier">−</button>
+            <button class="sync-val" class:sync-val-on={s.lyricOffset !== 0}
+                    onclick={() => setLyricOffset(0)}
+                    title={s.lyricOffset !== 0 ? 'Reset timing offset' : 'Timing offset'}>{offsetLabel}</button>
+            <button class="sync-btn" onclick={() => nudgeLyricOffset(0.25)} title="Lyrics 0.25s later">+</button>
+            <button class="sync-btn sync-tap" class:sync-tap-on={s.lyricSyncMode}
+                    onclick={() => s.lyricSyncMode = !s.lyricSyncMode}
+                    title="Tap-to-sync: click this, then click the lyric line you are hearing">◎</button>
+          </span>
+        {/if}
         <button class="lyrics-close" onclick={() => s.showLyrics=false}>✕</button>
       </span>
     </div>
 
     {#if s.lyrics.length > 0}
+      {#if s.lyricSyncMode}
+        <div class="sync-hint">Click the line you are hearing right now</div>
+      {/if}
       <div class="lyrics-list">
         <LyricLines big={false} />
       </div>
@@ -72,6 +91,34 @@
     text-transform: uppercase; color: var(--muted)
   }
   .lyrics-header-right { display: flex; align-items: center; gap: 0.6rem }
+
+  /* lyric timing calibration controls */
+  .sync-ctl {
+    display: flex; align-items: center; gap: 1px;
+    background: var(--sf2); border: 1px solid var(--border);
+    border-radius: 9px; padding: 1px
+  }
+  .sync-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 0.7rem; width: 18px; height: 16px; line-height: 1;
+    border-radius: 6px; transition: color .12s, background .12s
+  }
+  .sync-btn:hover { color: var(--text); background: var(--sf3) }
+  .sync-val {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 0.56rem; font-weight: 700; min-width: 26px; height: 16px;
+    border-radius: 6px; font-variant-numeric: tabular-nums;
+    transition: color .12s
+  }
+  .sync-val-on { color: var(--accent) }
+  .sync-tap-on { color: var(--accent); background: var(--accent-15) }
+  .sync-hint {
+    flex-shrink: 0; text-align: center;
+    font-size: 0.62rem; font-weight: 600; letter-spacing: 0.04em;
+    color: var(--accent); background: var(--accent-08);
+    border-bottom: 1px solid var(--border);
+    padding: 0.35rem 0.6rem; text-transform: none
+  }
   /* muted pill matching the header's uppercase-label voice */
   .unsynced-badge {
     font-size: 0.56rem; font-weight: 700; letter-spacing: 0.07em;
